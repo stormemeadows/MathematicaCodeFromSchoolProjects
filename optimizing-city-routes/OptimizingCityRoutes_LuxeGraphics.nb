@@ -1,0 +1,288 @@
+(*Author: Storm Meadows*)
+ "Adding more drivers may not be more efficient since num partitions only approx equal (by weight, num verts, or num edges)"
+testGraph=GenerateDirectedGraph@5;
+(*clique=Subgraph[testGraph,#]&@FindClique[testGraph];
+HighlightGraph[(*Graph@EdgeList@*)testGraph,clique,GraphLayout\[Rule]"SpringElectricalEmbedding"]*)
+parts=Subgraph[testGraph,#]&/@FindGraphPartition[testGraph,3];
+HighlightGraph[(*Graph@EdgeList@*)testGraph,parts,GraphLayout->"SpringElectricalEmbedding"]
+(*Project 1b: Routing Snowplows through Seattle*)
+(*Solving the Route Inspection Problem*)
+Init[openSourceFiles_]:=Module[{(*SetupProject*),srcDir=FileNameJoin[{NotebookDirectory[],"src"}]},(
+Module[{initFile},(
+initFile=NotebookOpen[FileNameJoin[{srcDir,"init.nb"}],
+Visible->False,Saveable->False];
+NotebookEvaluate[initFile];
+NotebookClose[initFile];
+)];
+
+LoadModules[srcDir,openSourceFiles,
+UtilitiesModule,
+(*TensorModule,*)
+
+ConstantsAndRequiredVariablesModule,
+
+ImageProcessingModule,
+
+PrintingModule,
+GraphicsModule,
+
+GraphsModule,
+StreetToGraphConversionModule,
+
+GraphsTestsModule,
+AlgorithmsForProjectModule
+];
+
+InitSymbols[];
+
+(*SetupProject[]:=*)
+Module[{},(
+GetVertexCoordinates[graph_,vertex_]:=PropertyValue[{graph,vertex},VertexCoordinates];
+
+(*VertPathToEdgePath[vertPath_]:=MapThread[DirectedEdge,{vertPath[[;;-2]],vertPath[[2;;]]}];
+GetSubGraphWeight[mainGraph_,subGraph_]:=Total[GetEdgeWeight[mainGraph,#]&/@EdgeList@subGraph];
+(*PathToPathGraph[vertPath_]:=Graph[((EdgeList@PathGraph@vertPath)/.UndirectedEdge\[Rule]DirectedEdge)];*)
+PathToPathGraph[vertPath_]:=PathGraph[vertPath,DirectedEdges\[Rule]True];
+GetPathWeight[mainGraph_,vertPath_]:=Total[GetEdgeWeight[mainGraph,#]&/@VertPathToEdgePath[vertPath]];*)
+
+(** Program Constants **)
+$PrintGraphsQ  =False;
+$VerboseQ           =True;
+$StateSuppressedQ=True;
+$DebugAllQ         =True;
+
+$ProjectDirectory=NotebookDirectory[];
+
+$CityMapFile    = "bigMapOfSeattle.jpg";
+$StreetMapFile= "seattleStreetMap.jpg";
+
+
+(* Found manually by matching the vertices of the graph generated from the map of seattle
+ to the corresponding endpoints of one-way streets (found on Google Maps).
+Structure is {{Subscript[startingVertex, 1], Subscript[endingVertex, 1]},{Subscript[startingVertex, 2], Subscript[endingVertex, 2]},...} *)
+$EndpointsForOneWayStreets={
+{59,230},{78,404},{94,1448},{118,172},{122,879},{132,816},{162,230},
+{211,873},{245,25},{274,351},{369,710},{565,879},{583,1437},{747,1060},
+{873,139},{913,1140},{1120,082},{1239,1083},{1348,1379},{1424,639}
+};
+
+(* Constructs the graph used to represent the road network of Downtown Seattle and Central District (between Denny Way and E Yesler Way) *)
+$NetworkGraph=CreateNetworkGraph[$ProjectDirectory,$CityMapFile,$StreetMapFile, $EndpointsForOneWayStreets];
+
+$TotalGraphWeight=GetTotalGraphWeight@$NetworkGraph;
+
+(*The approximate distance corresponding to a path with a weight of 484 is 3.21 miles.
+Corresponding mileage found using Google Maps.
+For a better approximation, we should really do this for many roads (30 or more - because central limit theorem ftw) and then take their average,
+buuuuut that's a massive waste of time.*)
+$MilesOfLongRoadAssInSeattle=3.21;
+$EdgeSetCorrespondingToLongRoadAssInSeattle={63\[DirectedEdge]64,64\[DirectedEdge]72,72\[DirectedEdge]73,73\[DirectedEdge]69,69\[DirectedEdge]74,74\[DirectedEdge]70,70\[DirectedEdge]78,78\[DirectedEdge]65,65\[DirectedEdge]75,75\[DirectedEdge]76,76\[DirectedEdge]79,79\[DirectedEdge]94,94\[DirectedEdge]112,112\[DirectedEdge]113,113\[DirectedEdge]81,81\[DirectedEdge]95,95\[DirectedEdge]96,96\[DirectedEdge]114,114\[DirectedEdge]82,82\[DirectedEdge]97,97\[DirectedEdge]98,98\[DirectedEdge]83,83\[DirectedEdge]115,115\[DirectedEdge]99,99\[DirectedEdge]84,84\[DirectedEdge]116,116\[DirectedEdge]85,85\[DirectedEdge]117,117\[DirectedEdge]118,118\[DirectedEdge]100,100\[DirectedEdge]119,119\[DirectedEdge]120,120\[DirectedEdge]121,121\[DirectedEdge]101,101\[DirectedEdge]143,122\[DirectedEdge]143,122\[DirectedEdge]144,144\[DirectedEdge]133,133\[DirectedEdge]134,134\[DirectedEdge]135,135\[DirectedEdge]145,145\[DirectedEdge]136,136\[DirectedEdge]123,123\[DirectedEdge]137,137\[DirectedEdge]102,102\[DirectedEdge]103,103\[DirectedEdge]104,104\[DirectedEdge]124,124\[DirectedEdge]86,86\[DirectedEdge]105,105\[DirectedEdge]106,106\[DirectedEdge]107,107\[DirectedEdge]108,108\[DirectedEdge]109,109\[DirectedEdge]146,146\[DirectedEdge]155,155\[DirectedEdge]156,156\[DirectedEdge]157,157\[DirectedEdge]158,158\[DirectedEdge]159,159\[DirectedEdge]160,160\[DirectedEdge]161,161\[DirectedEdge]166,166\[DirectedEdge]167,167\[DirectedEdge]191,191\[DirectedEdge]192,192\[DirectedEdge]147,147\[DirectedEdge]125,125\[DirectedEdge]126,126\[DirectedEdge]127,127\[DirectedEdge]128,128\[DirectedEdge]138,138\[DirectedEdge]139,139\[DirectedEdge]140,140\[DirectedEdge]141,141\[DirectedEdge]148,148\[DirectedEdge]142,142\[DirectedEdge]149};
+
+$MilesPerUnitWeight=$MilesOfLongRoadAssInSeattle/GetWeightOfRoad[$NetworkGraph,$EdgeSetCorrespondingToLongRoadAssInSeattle];
+$EdgeWeightPerMiles=1/$MilesPerUnitWeight;
+)];
+(*SetupProject[];*)
+
+Print["Program initialized."];
+
+(*ProgramState[];
+DebugPrint[True,"$NetworkGraph, total edge weight, and corresponding mileage",
+(*HoldForm[$NetworkGraph]*),HoldForm[$TotalGraphWeight],HoldForm[ConvertEdgeWeightToMiles@$TotalGraphWeight]];*)
+)];
+Init[False];
+
+(*Show[HighlightGraph[$NetworkGraph,Graph@$EdgeSetCorrespondingToLongRoadAssInSeattle],ImageSize\[Rule]Full]*)
+TestsOnPathsBetweenSinksAndSources@7
+testGraph=GenerateDirectedGraph@7;
+MakeTJoinSubgraph[testGraph]
+
+TraceTour[graph_,tourToTrace_]:=SetProperty[graph,
+Epilog->{
+Arrowheads[Join[{0},ConstantArray[.0125,100]]],
+Thickness[.001],
+Opacity[.7],Darker@Purple,
+Arrow[BSplineCurve[(GetVertexCoordinates[graph,#]&/@Append[tourToTrace[[;;,1]],tourToTrace[[1,1]]]),SplineDegree->2]]}
+];
+TraceShortestTour[graph_]:=TraceTour[graph,First@FindPostmanTour@graph];
+
+
+ColorFn[tours_]:={Style[tours,Black,Thick],Style[tours[[All,1]],Red,Thick],Style[tours[[-1,2]],Yellow,Larger]};
+WatchTour[graph_,tour_]:=Dynamic[(
+TableForm[{
+{Show[HighlightGraph[TraceTour[graph,tour],ColorFn[tour[[1;;#]]],GraphHighlightStyle->"Thick"],ImageSize->Large]}
+}
+])&@Clock[{1,Length[tour],1},15]
+]
+WatchShortestTour[graph_]:=WatchTour[graph,First@FindPostmanTour@graph];
+(*WatchShortestTour@GenerateDirectedGraph@7*)
+
+
+TraceStepsOfTour[graph_,tour_,rate_]:=DynamicModule[{
+lengthOfTour=Length[tour],
+numTimesEachEdgeWasUsed=Tally@tour,
+repeatedEdges,maxTimesAnEdgeWasUsed,
+subGraphs,numTimesEachSubgraphWasRepeated,
+totalWeightOfGraph,subGraphWeights,tourWeight,
+weightContributedByEachSubgraphOfTour,maximalEfficieny,
+totalRoadNetworkMileage,tourMileage,
+
+highlightedSubgraphs,graphWithASubgraphRemoved,isolatedSubgraphs,
+graphWithHighlightedSubgraphs,
+subGraphColors,
+subGraphEdgeLists,
+edgeStyles,
+
+steps,subTours,
+totalVertexVisits,
+totalEdgeVisits,
+ColorFn,GraphFn,ShowGraphFn,idxFn,
+diValFn
+},(
+
+diValFn=VertexOutDegree[graph,#]-VertexInDegree[graph,#]&;
+idxFn=1+Mod[#,lengthOfTour]&;
+
+steps=(Arrow[BSplineCurve[(GetVertexCoordinates[graph,#]&/@Append[
+tour[[;;idxFn[#-1],1]],tour[[idxFn[#],1]]
+]),SplineDegree->2]])&/@Range[lengthOfTour];
+
+repeatedEdges=Select[numTimesEachEdgeWasUsed,(Last@#>1)&];
+
+(*"max times an edge was used"*)
+maxTimesAnEdgeWasUsed=Max[numTimesEachEdgeWasUsed[[;;,2]]];
+
+(*"coefficients from repeating repeating repeating subgraphs"*)
+numTimesEachSubgraphWasRepeated=Range@maxTimesAnEdgeWasUsed;(*Range@Length@subGraphs;*)
+
+(*"each subgraph's contrubution to total weight of tour, due to repeating them"*)
+weightContributedByEachSubgraphOfTour=numTimesEachSubgraphWasRepeated*subGraphWeights;
+
+(*"collect the different subgraphs"*)
+subGraphColors=RandomColor[maxTimesAnEdgeWasUsed];
+(*subGraphs=Table[
+Graph[
+Select[numTimesEachEdgeWasUsed,#[[2]]\[Equal]i&][[;;,1]],
+EdgeStyle\[Rule]{subGraphColors[[i]],Thickness[i*0.15]},
+EdgeShapeFunction\[Rule]GraphElementData["HalfFilledArrow","ArrowSize"\[Rule]0.05]
+],
+{i,Range@maxTimesAnEdgeWasUsed}];*)
+
+subGraphEdgeLists=Table[Select[numTimesEachEdgeWasUsed,#[[2]]==i&][[;;,1]],{i,Range@maxTimesAnEdgeWasUsed}];
+subGraphs=Table[
+Graph[subGraphEdgeLists[[i]]
+,EdgeStyle->subGraphColors[[i]]
+,GraphHighlightStyle->subGraphColors[[i]]
+(*,EdgeStyle\[Rule]{subGraphColors[[i]],Thickness[i*0.15]}*)
+(*,EdgeShapeFunction\[Rule]GraphElementData["HalfFilledArrow","ArrowSize"\[Rule]0.4]*)
+],{i,Range@maxTimesAnEdgeWasUsed}];
+
+(*"weight of each subgraph in tour"*)
+subGraphWeights=GetSubGraphWeight[graph,#]&/@subGraphs;
+
+(*"total tour weight"*)
+tourWeight=GetSubGraphWeight[graph,Graph@tour];
+
+(*"total weight of the entire graph"*)
+totalWeightOfGraph=GetTotalGraphWeight@graph;
+
+(*"maximal efficieny = (weight of minimal edge-tour) / (weight of entire graph)"*)
+maximalEfficieny=(tourWeight/totalWeightOfGraph)//N;
+
+(*"total mileage of roads in road network"*)
+totalRoadNetworkMileage = ConvertEdgeWeightToMiles@totalWeightOfGraph;
+
+(*"total mileage of tour"*)
+tourMileage = ConvertEdgeWeightToMiles@tourWeight;
+
+
+totalVertexVisits=Association[(Rule[#[[1]],#[[2]]]&)/@Tally[(tour)/.{DirectedEdge->Sequence,UndirectedEdge->Sequence}]];
+totalEdgeVisits=Association[(Rule[#[[1]],#[[2]]]&)/@numTimesEachEdgeWasUsed];
+(*Print@totalVertexVisits;*)
+(*Print@totalEdgeVisits;*)
+
+ColorFn[tours_]:=Module[{
+curEdge=tours[[-1]],
+prevEdges=tours[[;;-2]],
+curVert=tours[[-1,1]],
+nextVert=tours[[-1,2]],
+prevVerts=tours[[;;-2,1]],
+visitsLeftForCurEdge,
+visitsLeftForCurVert
+},(
+visitsLeftForCurEdge=totalEdgeVisits[curEdge];
+totalEdgeVisits[curEdge]=visitsLeftForCurEdge-1;
+(*Print[curEdge," : ",totalEdgeVisits[curEdge]];*)
+
+visitsLeftForCurVert=totalVertexVisits[curVert];
+totalVertexVisits[curVert]=visitsLeftForCurVert-1;
+(*Print[curVert," : ",totalVertexVisits[curVert]];*)
+
+Return@{Style[prevEdges,Black,Thickness[0.001]],
+Style[curEdge,Black,Thickness[0.01]],
+Style[prevVerts,LightGray],
+Style[curVert,Blue],
+Style[nextVert,Green]
+};
+)];
+
+subTours=Table[ColorFn[tour[[;;idxFn[i]]]],{i,lengthOfTour}];
+
+
+(*edgeStyles=Table[Rule[#,subGraphColors[[i]]]&/@subGraphEdgeLists[[i]],{i,Range@maxTimesAnEdgeWasUsed}];
+Print@Dimensions@subGraphEdgeLists;
+Print@edgeStyles;*)
+(*graphWithHighlightedSubgraphs=HighlightGraph[graph,subGraphs,EdgeStyle\[Rule](MapThread[Rule,{subGraphEdgeLists,subGraphColors}])];*)
+(*graphWithHighlightedSubgraphs=HighlightGraph[graph,subGraphs,GraphHighlightStyle\[Rule]edgeStyles];*)
+graphWithHighlightedSubgraphs=HighlightGraph[graph,subGraphs];
+
+GraphFn[stepNum_]:=
+SetProperty[(*graph*)
+graphWithHighlightedSubgraphs,
+Epilog->{
+Arrowheads[Join[{0},ConstantArray[.0125,stepNum*20]]],
+Thickness[.001],
+Opacity[.5],Orange,
+steps[[stepNum]]}
+];
+
+
+(*ShowGraphFn[stepNum_]:=Show[SetProperty[{GraphFn[stepNum]},GraphHighlight\[Rule]subTours[[stepNum-1]]],ImageSize\[Rule]Large];*)
+ShowGraphFn[stepNum_]:=Show[HighlightGraph[GraphFn[stepNum],subTours[[stepNum-1]]],ImageSize->Large];
+
+
+highlightedSubgraphs=HighlightGraph[graph,#,GraphHighlightStyle->"Dashed"]&/@subGraphs;
+graphWithASubgraphRemoved=HighlightGraph[graph,#,GraphHighlightStyle->"DehighlightHide"]&/@(GraphDifference[graph,#]&/@subGraphs);
+isolatedSubgraphs=HighlightGraph[graph,#,GraphHighlightStyle->"DehighlightHide"]&/@(
+GraphDifference[graph,GraphDifference[graph,#]]&/@subGraphs);
+
+
+Dynamic[(
+TableForm[{
+{highlightedSubgraphs,graphWithASubgraphRemoved,isolatedSubgraphs}
+{{HighlightGraph[graph,#,GraphHighlightStyle->"Dashed"]&/@subGraphs,subGraphWeights}},
+{{Range@maxTimesAnEdgeWasUsed,subGraphColors}},
+{Show[graphWithHighlightedSubgraphs,ImageSize->Large],ShowGraphFn@#}
+}]&@Clock[{1,lengthOfTour,1},rate]
+)]
+
+)];
+TraceStepsOfShortestTour[graph_,rate_]:=TraceStepsOfTour[graph,First@FindPostmanTour@graph,rate];
+TraceStepsOfShortestTour[graph_]:=TraceStepsOfShortestTour[graph,20];
+
+
+(*testGraph=tmpG;*)
+testGraph=GenerateDirectedGraph@4;
+(*TraceStepsOfShortestTour@Graph[#,
+(*GraphStyle\[Rule]"Vintage",*)
+EdgeShapeFunction\[Rule]GraphElementData["HalfFilledArrow","ArrowSize"\[Rule]0.05],
+EdgeStyle\[Rule]Thick,
+VertexSize\[Rule]Medium]&@testGraph*)
+TraceStepsOfShortestTour@testGraph
+(*TraceShortestTour@testGraph*)
+
+RandomSample[#,Length@#]&@(GetVertexCoordinates[$NetworkGraph,#]&/@VertexList@testGraph)
+(*comps=ConnectedComponents@$NetworkGraph;*)
+(*testGraph=GenerateDirectedGraph@20;
+GraphRadius@testGraph
+GraphDiameter@testGraph*)
+(*m=GraphDistanceMatrix@$NetworkGraph;*)

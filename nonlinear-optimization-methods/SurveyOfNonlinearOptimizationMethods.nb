@@ -1,0 +1,1800 @@
+(*Author: Storm Meadows*)
+(********************************************************
+Documentation:
+Purpose:
+This Mathematica notebook is only meant to aid in the demonstration and visualization of a few key descent algorithms over convex functions.
+Using functions that are not convex will almost surely yield incorrect solutions and/or expose "bugs" - there are very few safeguards for malformed input.
+Naming Conventions:
+This Mathematica notebook uses the following naming conventions to indicate the type of function expression is expected in a :
+"Symbolic function expressions" (i.e. function expressions in ordinary mathematical notation, like x^2) and "programmatic functions" are denoted by the suffixes SymFn and Fn, resp. Eg :
+fooSymFn = x^2
+Compared to:
+fooFn = (#1)^2 &   (which is semantiacally equivalent to fooFn[x_] := x^2 in Mathematica)
+A symbolic function expression can be converted to regular function by applying ToFnForm (which is defined below). Eg :
+fSymFn = x^3;
+fFn = ToFnForm[ fSymFn ] ;
+Print[  fFn[ 2 ]  ];
+>>> 8
+Usage:
+IMPORTANT!!
+You have to associate variables with your (symbolic/formulaic) function before you can do anything with it!
+To do this, use SetVars[ yourNVariableSymFn, {var1,var2,...,varN }].
+E.g., SetVars[ (x-2)^E^(-y+cos(x-y)), {x, y} ]
+The descent algorithms that we've studied so far follow one simple outline. The key differences between them lay in their choice of subroutines; specifically,
+the subroutines used for solving/finding, gradients, step directions, and step lengths (line-search).
+This suggests that we can create different descent algorithms by simply plugging-in different subroutines to accomplish their respective tasks,
+which is exactly the purpose of this notebook.
+By following the APIs below for the various types of subroutines, you can quickly create new descent algorithms by simply plugging them into AbstractDescentMethod.
+All of the algorithms and subroutines that we've studied so far are in this notebook, and can serve as examples for writing your own.
+The results of AbstractDescentMethod and
+TODO: FIX THIS SECTION!! (inaccurate after that timesuck/bug)
+APIs and Function Signatures:
+Follow these instructions if you'd like to code your own functions that can be plugged into AbstractDescentMethod.
+These instructions are formatted as follows:
+TypeOfFunction
+@param1 parameterName (data type - descrcription of 1st parameter)
+...
+@paramN parameterName (data type - descrcription of Nth parameter)
+@return   returnValueName  (data type - descrcription of return value)
+Gradient functions
+@param1 objectiveFunctionSymFn (symbolic function - see "Naming Conventions")
+@param2 pointAtWhichToEvaluateGradient (numerical vector)
+@return   evaluatedGradient  (numerical vector - the gradient of the objective function, evaluated at the point)
+(Anti-)Step direction functions
+@param1 objectiveFunctionSymFn (symbolic function - see "Naming Conventions")
+@param2 pointAtWhichToEvaluateStepDirection (numerical vector)
+@return   antiStepDirectionFromPointFn  (numerical vector - the direction vector of MAXIMAL INCREASE, because AbstractDescentMethod uses its the negative of this (at least as of now - I might change this))
+Line search (steplength) functions
+@param1 objectiveFunctionSymFn (symbolic function - see "Naming Conventions")
+@param2 pointAtWhichToEvaluate (numerical vector)
+@param3 directionOfIncreaseFn (function - see "Naming Conventions")
+@param4 gradientAtPoint (numerical vector - your linesearch function may not actually use this, but it must be included in its signature in order to use AbstractDescentMethod))
+@return   magnitudeOfStep (numerical scalar)
+(*(*Ignore - unimplemented*)
+Descent method iteration functions
+@param1 iterate  (numerical vector - the coordinates of the current iterate)
+@param2 gradientFn  (see "Gradient functions" API)\n@param3 stepDirectionFn  (see "Step direction functions" API)\n@param4 lineSearchFnForSymFn  (see "Line search functions" API)\n@return   nextIterate  (numerical vector - the coordinates of the next iterate)*)
+To "subclass" AbstractDescentMethod, define your method in the following manner, the parameter that follow thereafter:
+YourDescentAlgorithm[objectiveFunctionSymFn_, x0_, tolerance_, maxIterations_] :=
+AbstractDescentMethod[
+ objectiveFunctionSymFn,
+ x0,
+ YourGradientFn,
+ YourAntiStepDirectionFn,
+ YourLineSearchFn,
+ tolerance,
+ "Nick Name of Your Descent Method"
+ YourDesiredMaxNumberOfIterations
+];
+@param1 objectiveFunctionSymFn  (symbolic function - see "Naming Conventions")
+@param2 x0  (numerical vector - the coordinates of the initial iterate)
+@param3 gradientFn  (see "Gradient functions" API)
+@param4 antiStepDirectionFromPointFn  (see "Step direction functions" API)
+@param5 lineSearchFnForSymFn  (see "Line search functions" API)
+(*@param6 descentMethodIterationFunction (* unimplemented - ignore this *) *)
+@param6 tolerance (numerical scalar - stopping criteria parameter. is compared against the magnitude of the gradient on each iteration)
+@param7 nickNameOfDescentMethod (string - whatever you'd like to call your descent algorithm)
+@param8 maxIterations (numerical scalar - to break out of an algorithm that doesn't converge quickly enough)
+@return   results (Association (like an array, but can be accessed using any type of object as a "key," rather than just integers) - check out the bottom of AbstractDescentMethod's definition to see how "results" is structured)
+********************************************************)
+
+
+Source Code:
+Default parameters:
+(* For backtracking. *)
+$DefaultBTMaxAttempts=50;
+$DefaultBTParamBeta=0.5;
+$DefaultBTParamGamma=0.5;
+$DefaultBTParamS=1;
+
+(* For finite-difference gradient approximations. *)
+$DefaultFDsParamIntervalWidth=N[10^(-8)];
+
+(* For descent methods. *)
+$DefaultMaxIterations=N[10^(4)];
+Helper functions (nothing to do with the material from class):
+$VarHash=<||>;
+SetVars[symFn_,variables_]:=($VarHash[(Key[Hash@Expand@Rationalize@symFn])]=variables; Return[symFn]);
+GetVars[symFn_]:=Lookup[$VarHash,Key[Hash@Expand@Rationalize@symFn],Throw[StringForm[
+"Sorry, couldn't find variables associated with ``. \nYou have to associate variables with the function first. \nTo do this, use SetVars[yourNVariableSymFn,{var1,var2,...,varN}]. \nEg: SetVars[``,{x,y}].",
+TraditionalForm[symFn],TraditionalForm[Cos[x-y]+(x-2)^(E^-y)]]]];
+ExceptionMessage[args__]:=StringJoin[ToString[#]<>" "&/@{args}];
+ThrowExepction[args__]:=Throw[ExceptionMessage[args]];
+ThrowExepctionIf[bool_,args__]:=If[bool,ThrowExepction[args]];
+ArrayToSequence[ary_]:=ary/.List->Sequence;
+NArrayToSequence[ary_]:=N[ary]/.List->Sequence;
+SymFnToFn[symFn_,variables_]:=Function[Evaluate[variables],N[Evaluate[symFn]]]//N;
+EvalSymFnAtPoint[symFn_,variables_,point_]:=SymFnToFn[symFn,variables][NArrayToSequence[point]]//N;
+EvalSymFnAtPoint[symFn_,variables_]:=EvalSymFnAtPoint[symFn,variables,#]&//N;
+EvalSymFnAtPoint[symFn_]:=EvalSymFnAtPoint[symFn,GetVars@symFn]//N;
+FnForm=EvalSymFnAtPoint;
+T=Transpose;
+M=MatrixForm;
+NthOrdinaryDerivative[symFn_,variables_,n_]:=N[D[symFn,{variables,n}]];
+NthOrdinaryDerivative[symFn_,n_]:=D[symFn,{GetVars[symFn],n}];
+G[symFn_]:=NthOrdinaryDerivative[symFn,1];  (* Gradient *)
+H[symFn_]:=NthOrdinaryDerivative[symFn,2];  (* Hessian *)
+
+(* Calculates the average of the points - their "center of mass." *)
+Barycenter[points__]:=(Total[{points}]/Length[{points}]);
+BarycenterFromList[points_]:=(Total[points]/Length[points]);  (*for backwards compat - TODO, update original*)
+
+(* Calculates the Euclidean distance between two points. *)
+EuclideanMetric[p1_,p2_]:=Norm[p1-p2];
+
+WidestRangeForDim[points__,idx_]:={Min[#[[idx]]&/@{points}],Max[#[[idx]]&/@{points}]};
+
+ZeroVector[dimension_]:=Array[0&,dimension];
+
+(* Used to calculate the ratio of the inner product defined on the ambient space (assumed to be Euclidean) and that defined on tangent space of the surface at a point. *)
+InnerProductRatio[tangentVector_,tangentSpaceMetricTensor_]:=((tangentVector.tangentVector)/(tangentVector.tangentSpaceMetricTensor.tangentVector));
+
+(* Returns True if symFn is a quadratic function. *)
+QuadraticFunctionQ[symFn_]:=Module[{vars=GetVars[symFn]},Return@TrueQ[PolynomialQ[symFn,vars] && Max[Exponent[symFn,vars]] == 2]];
+Gradient functions:
+Closed-Form Gradient
+(* Returns the functional form of the actual (vs approximated) gradient of symFn which can then be applied to any points in symFn's domain. *)
+ActualGradientAtPointFn[symFn_]:=FnForm[G[symFn],GetVars[symFn]];
+Numerical/Approximate Gradient (using Finite Differences)
+(* Returns a functional form of FFDApproxGradAtPointForSymFn, parameterized by symFn, which can then be applied directly to points. *)
+ApproxGradientAtPointFn[symFn_]:=FFDApproxGradAtPointForFn[FnForm[symFn],#]&;
+
+
+(* - SLOW(ish) VERSION -
+Approximates the gradient using forward differences.
+Equivalent to, and more readable than, the version below (FFDApproxGradAtPointForSymFnFn), but slower. *)
+FFDApproxGradAtPointForSymFnFnOLDVERSION[symFn_,point_,widthOfInterval_,basis_]:=Module[{
+fn=FnForm[symFn],xk=point,dimension=First@Dimensions@point,h=widthOfInterval,
+approxGradNearPoint,i,valOfFAtPoint
+},(
+valOfFAtPoint=fn[xk];
+approxGradNearPoint=ZeroVector@dimension;
+For[i=1,i<=dimension,i++,
+(*approxGradNearPoint[[i]]=(fn[xk+h*basis[[i]]] - valOfFAtPoint)/h;*)
+approxGradNearPoint[[i]]=fn[xk+h*basis[[i]]] - valOfFAtPoint;
+];
+(*Return[approxGradNearPoint];*)
+Return[approxGradNearPoint/h];
+)];
+FFDApproxGradAtPointForSymFnFnOLDVERSION[symFn_,p_]:=FFDApproxGradAtPointForSymFnFnOLDVERSION[symFn,p,$DefaultFDsParamIntervalWidth,IdentityMatrix@Length@p];
+
+(* Approximates the gradient using forward differences. The other version (above) is more readable. *)
+FastFFDApproxGradAtPointForFn[fn_,xk_,h_,basis_]:=ParallelMap[(fn[xk+(#*h)] - fn[xk])&,basis]/h;
+FastFFDApproxGradAtPointForFn[fn_,p_,h_]:=FastFFDApproxGradAtPointForFn[fn,p,h,IdentityMatrix@Length@p];
+FastFFDApproxGradAtPointForFn[fn_,p_]:=FastFFDApproxGradAtPointForFn[fn,p,$DefaultFDsParamIntervalWidth];
+
+FastCFDApproxGradAtPointForFn[fn_,xk_,h_,basis_]:=ParallelMap[(fn[xk+(#*h/2)] - fn[xk-(#*h/2)])&,basis]/h;
+FastCFDApproxGradAtPointForFn[fn_,p_,h_]:=FastCFDApproxGradAtPointForFn[fn,p,h,IdentityMatrix@Length@p];
+FastCFDApproxGradAtPointForFn[fn_,p_]:=FastCFDApproxGradAtPointForFn[fn,p,$DefaultFDsParamIntervalWidth];
+
+FastBFDApproxGradAtPointForFn[fn_,xk_,h_,basis_]:=ParallelMap[(fn[xk] - fn[xk-(#*h)])&,basis]/h;
+FastBFDApproxGradAtPointForFn[fn_,p_,h_]:=FastBFDApproxGradAtPointForFn[fn,p,h,IdentityMatrix@Length@p];
+FastBFDApproxGradAtPointForFn[fn_,p_]:=FastBFDApproxGradAtPointForFn[fn,p,$DefaultFDsParamIntervalWidth];
+
+
+(* Can be used to take arbitrary types of finite-differnce gradient approximations at a point. E.g.,
+Passing 1 for the weightOfForwardPoint argument would be equivalent to a FORWARD-difference approximator,
+passing 0 would be equivalent to a BACKWARD-difference approximator,
+and   0.5 would return a CENTRAL-difference approximator. *)
+FDApproxGradAtPointForFn[fn_,point_,widthOfInterval_,weightOfForwardPoint_,basis_]:=Module[{
+xk=point,
+h=widthOfInterval,
+w1=weightOfForwardPoint,
+w2=(1-weightOfForwardPoint) (* weight of the backward point *)
+},(
+ThrowExepctionIf[!(0<=w1&&w1<=1),"weight must be between 0 and 1 (inclusive)!"];
+ThrowExepctionIf[!(h>0),"width of intereval must be greater than 0!"];
+(*Return[((fn[xk+h*w*#]- fn[xk-h*(1-w)*#])&/@basis)/h];*)
+Return[ParallelMap[N[(fn[xk+h*w1*#]- fn[xk-h*w2*#])]&,basis]/h];
+)];
+FDApproxGradAtPointForFn[fn_,p_,h_,w_]:=FDApproxGradAtPointForFn[fn,p,h,w,IdentityMatrix@Length@p];
+FDApproxGradAtPointForFn[fn_,p_,w_]:=FDApproxGradAtPointForFn[fn,p,$DefaultFDsParamIntervalWidth,w];
+
+FFDApproxGradAtPointForFn[fn_,p_]:=FDApproxGradAtPointForFn[fn,p,1];
+CFDApproxGradAtPointForFn[fn_,p_]:=FDApproxGradAtPointForFn[fn,p,0.5];
+BFDApproxGradAtPointForFn[fn_,p_]:=FDApproxGradAtPointForFn[fn,p,0];
+Tests for Gradient Approximators
+(*Module[{
+testSymFn=SetVars[(x^5+y^12),{x,y}],
+testPoint={-3,3},
+testWidth=0.1,
+testWeight=0.5,
+discreteWidthPlotData,discreteWidthPlot,
+discreteWeightPlotData,discreteWeightPlot,
+discreteWeightVsWidthPlot,allPlots
+},(
+
+discreteWidthPlotData=Table[FDApproxGradAtPointForSymFn[testSymFn,testPoint,width,testWeight],
+{width,0.01,1,0.01}];
+discreteWeightPlotData=Table[FDApproxGradAtPointForSymFn[testSymFn,testPoint,testWidth,weight],
+{weight,0,1,0.01}];
+Table[FDApproxGradAtPointForSymFn[testSymFn,testPoint,width,testWeight],
+{width,0.01,1,0.01}];
+
+allPlots={
+discreteWeightVsWidthPlot=ListPlot3D[Table[FDApproxGradAtPointForSymFn[testSymFn,testPoint,width,weight],
+{weight,0,1,.1},{width,.1,2,.1}],PlotTheme\[Rule]"Detailed"],
+discreteWidthPlot=ListPlot[discreteWidthPlotData,PlotTheme\[Rule]"Detailed"],
+discreteWeightPlot=ListPlot[discreteWeightPlotData,PlotTheme\[Rule]"Detailed"]
+};
+
+Print[MatrixForm/@{
+ActualGradientAtPointFn[testSymFn][testPoint],
+FDApproxGradAtPointForSymFn[testSymFn,testPoint,testWidth,testWeight],
+FFDGradientAtPointApproximator[testSymFn,testPoint],
+CFDGradientAtPointApproximator[testSymFn,testPoint],
+BFDGradientAtPointApproximator[testSymFn,testPoint]
+}];
+
+Show[GraphicsGrid[Partition[allPlots,3,3,1,{}],Frame\[Rule]All,ImageSize\[Rule]Full]]
+)]*)
+(Anti-)Step direction functions:
+Gradient Method (Anti-)Step Direction Functions
+(* The gradient step direction function is just the gradient function, but descriptive names are nice. *)
+ApproxGradientStepDirectionAtPointFn=ApproxGradientAtPointFn;
+ActualGradientStepDirectionAtPointFn=ActualGradientAtPointFn;
+Newton Method (Anti-)Step Direction Functions
+ActualNewtonStepDirectionAtPoint[symFn_,point_]:=((Inverse[HessianAtPoint[symFn,point]]).(EvalSymFnAtPoint[G@symFn,GetVars@symFn,point]));
+ActualNewtonStepDirectionAtPointFn[symFn_]:=ActualNewtonStepDirectionAtPoint[symFn,#]&;
+
+(* A bit of a cheat, since we wouldn't really be able to compute the exact/formulaic Hessian if we couldn't do the same for the gradient.
+Should really be using an approximation of the Hessian - but that's for later in the course! *)
+(*ApproxNewtonStepDirectionAtPointFn[symFn_]:=(EvalSymFnAtPoint[(Inverse[H[symFn]].FFDApproxGradAtPointForSymFn[symFn,#]),GetVars[symFn],#])&;*)
+(*ApproxNewtonStepDirectionAtPoint[symFn_,point_]:=((Inverse[HessianAtPoint[symFn,point]]).(FFDApproxGradAtPointForSymFn[symFn,point]));
+ApproxNewtonStepDirectionAtPointFn[symFn_]:=ApproxNewtonStepDirectionAtPoint[symFn,#]&;*)
+Line search (step length) functions:
+Back Tracking
+(* Finds a "good enough" minimized steplength. *)
+AbstractBTForFn[fn_,point_,stepDirection_,gradFnEvaluatedAtXk_,s_,beta_,gamma_,maxAttempts_]:=Module[{
+a,attempts=0,
+alphaToleranceForNumericalStability=N[10^(-6)],
+(* Defining these here keeps Mathematica from repeating these operations unnecessarily every iteration of the while loop. *)
+alpha=s,
+fnOfLine=fn[point+#*stepDirection]&,
+leftSideFn=fn[point] -fn[point+#*stepDirection]&,
+rightSideFn=#*(-gamma*(gradFnEvaluatedAtXk.stepDirection))&
+},(
+
+While[leftSideFn[alpha]<=rightSideFn[alpha],( (* ARMIJOOOOOO! *)
+(*If[attempts++>maxAttempts,(Print[StringForm[
+"Hey! We couldn't find a satisfactory steplength within `` attempts. Here's the function we attempted to minimize: g(\[Alpha])=``, and here's the solution we're returning: ``",TraditionalForm[maxAttempts],TraditionalForm[fnOfLine[Symbol["\[Alpha]"]](*fn[xk+Symbol["\[Alpha]"]*pk]*)],TraditionalForm[alpha]]];
+Break[];
+)];*)
+If[alpha<alphaToleranceForNumericalStability,(
+(*PrintTemporary[StringForm[
+"Hey! The stepsize is getting too small for numerical stability (set at: ``). Here's the function we attempted to minimize: g(\[Alpha])=``, and here's the solution we're returning: ``",TraditionalForm[alphaToleranceForNumericalStability],TraditionalForm[fnOfLine[Symbol["\[Alpha]"]](*fn[xk+Symbol["\[Alpha]"]*pk]*)],TraditionalForm[alpha]]];*)
+Break[];
+)];
+alpha*=beta;
+)];
+(*PrintTemporary[StringForm["\[Alpha] =``",alpha]];*)
+Return[alpha];
+)];
+AbstractBTForFn[fn_,xk_,pk_,gradAtxk_,s_,b_,g_]:=AbstractBTForFn[fn,xk,pk,gradAtxk,s,b,g,$DefaultBTMaxAttempts];
+Exact Line Search
+(* Returns the magnitude ("alpha") of the steplength that minimizes the function along the span of the step-direction vector. *)
+ExactLineSearchForFn[fn_,point_,stepDirection_,foooooFakeArgToKeepAPIConsistentAcrossLineSearchMethodsbaaaaaar_]:=Module[{
+xk=point,pk=stepDirection,alpha,a},(
+(*If[QuadraticFunctionQ[symFn], (* Use the exact formula if quadratic. *)alpha=(pk.pk)/(pk.HessianAtPoint[symFn,point].pk);
+,(* Else, let Mathematica do find alpha. *) alpha=(a/.Last[NMinimize[(fn[xk+a*pk]),a]]);];*)
+alpha=(a/.Last[NMinimize[(fn[xk+a*pk]),a]]);
+Return[alpha];
+)];
+
+ExactLineSearchForFn2[fn_,point_,stepDirection_,foooooFakeArgToKeepAPIConsistentAcrossLineSearchMethodsbaaaaaar_]:=(a/.Last[NMinimize[(fn[point+a*stepDirection]),a]]);
+Basic descent method algorithms:
+AbstractDescentMethod
+(*------- AbstractDescentMethod. Can be used in away similar to how you'd use an abstract class in an object-oriented language. -------*)
+AbstractDescentMethod[objectiveFunctionSymFn_,x0_,
+gradientFn_,antiStepDirectionFromPointFn_,lineSearchFnForFn_,
+tolerance_,nickNameOfDescentMethod_,
+maxIterations_]:=Module[{
+vars,fn,
+pk,alphak,gradFnEvaluatedAtXk,
+actualSolnAndVal,actualSoln,
+foundSoln,results,
+
+(*step,
+steps={ZeroVector@2},
+gradients={},
+xkMinus1=N@x0*)
+xk=N@x0,
+tol=N@tolerance,
+maxIters=N@maxIterations,
+iters=0,
+iterates={},
+totalRunningTime,
+stepLengthCalculationTime,
+stepDirectionCalculationTime,
+timed
+},(
+stepLengthCalculationTime=0;
+stepDirectionCalculationTime=0;
+
+(*Print@StringForm[
+"objectiveFunctionSymFn: `` \nx0: `` \ngradientFn: `` \nantiStepDirectionFromPointFn: `` \nlineSearchFnForFn: `` \ntolerance: `` \nnickNameOfDescentMethod: `` \nmaxIterations: ``\n" ,
+objectiveFunctionSymFn,x0,gradientFn,antiStepDirectionFromPointFn,lineSearchFnForFn,tolerance,nickNameOfDescentMethod,maxIterations];*)
+
+vars=GetVars[objectiveFunctionSymFn];
+fn=FnForm[objectiveFunctionSymFn];
+
+
+totalRunningTime=First@Timing[
+
+(*Print[StringForm["xk = ``",xk]];*)
+AppendTo[iterates,Append[xk,fn[xk]]];
+gradFnEvaluatedAtXk=gradientFn[xk];(*AppendTo[gradients,gradFnEvaluatedAtXk];*)
+While[Norm[gradFnEvaluatedAtXk]>= tol ,(
+
+If[++iters>maxIters,(Print[StringForm[
+"`` didn't converge within `` iterations for the function: `` \nReturning the results now - try passing them to PlotResults2D or PrettyResults. \nIf everything looks fine and you'd like to continue executing the algorithm from where it left off, try passing the results to the ContinueDescent function along with (optionally) a new maximimum number of iterations and tolerance.",
+nickNameOfDescentMethod,TraditionalForm@maxIterations,TraditionalForm@objectiveFunctionSymFn]];
+Break[];
+)];
+
+(*pk=-antiStepDirectionFromPointFn[xk];*)
+timed=Timing[-antiStepDirectionFromPointFn[xk]];
+stepDirectionCalculationTime+=First@timed;
+pk=Last@timed;
+
+(*alphak=lineSearchFnForSymFn[objectiveFunctionSymFn,xk,pk,gradFnEvaluatedAtXk];*)
+timed=Timing[lineSearchFnForFn[xk,pk,gradFnEvaluatedAtXk]];
+stepLengthCalculationTime+=First@timed;
+alphak=Last@timed;
+
+xk+=alphak*pk;
+AppendTo[iterates,Append[xk,fn[xk]]];
+
+gradFnEvaluatedAtXk=gradientFn[xk];
+(*AppendTo[gradients,gradFnEvaluatedAtXk];*)
+)];
+];
+
+foundSoln=Last@iterates;
+actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[objectiveFunctionSymFn,vars];
+(*actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[fn[(vars/.List\[Rule]Sequence)],vars];*)
+
+results=<|
+"nickName"->nickNameOfDescentMethod,
+"objectiveFunctionSymFn"->objectiveFunctionSymFn,
+"vars"->vars,
+"x0"->First@iterates,
+(*"gradients"\[Rule]gradients,
+"steps"\[Rule]steps, *)
+"foundSoln"->foundSoln,
+"actualSoln"->actualSoln,
+"distanceFromActual"->Norm[foundSoln[[;;-2]]-actualSoln[[;;-2]]],
+"differenceFromActual"->Abs[foundSoln[[-1]]-actualSoln[[-1]]],
+"iterations"->iters,
+"iterates"->iterates,
+
+"totalRunningTime"->totalRunningTime,
+"stepDirectionCalculationTime"->stepDirectionCalculationTime,
+"stepLengthCalculationTime"->stepLengthCalculationTime,
+
+"parameters"-><|
+"tolerance"->tol,
+"gradientFn"->gradientFn,
+"antiStepDirectionFromPointFn"->antiStepDirectionFromPointFn,
+"lineSearchFnForSymFn"->lineSearchFnForFn,
+"maxIterations"->maxIterations
+|>
+
+|>;
+
+(*results=Join[results,<|"convergenceAnalysisData"\[Rule]ConvergenceAnalysisOfDescentMethod[results]|>];*)
+Return@results;
+)];
+
+(* Set default maxIterations to 10^(5) *)
+AbstractDescentMethod[
+objectiveFunctionSymFn_,x0_,
+gradientFn_,
+antiStepDirectionFromPointFn_,
+lineSearchFnForSymFn_,
+tolerance_,nickNameOfDescentMethod_]:=AbstractDescentMethod[
+objectiveFunctionSymFn,x0,
+gradientFn,
+antiStepDirectionFromPointFn,
+lineSearchFnForSymFn,
+tolerance,nickNameOfDescentMethod,
+$DefaultMaxIterations];
+Concrete descent methods, "subclassed" from AbstractDescentMethod
+(*---------------------------------------------------------------------------------------*)
+(*------------------------------ Gradient descent methods -------------------------------*)
+GradientWithELS[symFn_,x0_,tolerance_]:=AbstractDescentMethod[
+symFn,x0,
+FnForm[G[symFn],GetVars[symFn]],
+FnForm[G[symFn],GetVars[symFn]],
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"GradDescent-ExactLineSearch"
+];
+
+GradientWithBT[symFn_,x0_,tolerance_,s_,beta_,gamma_]:=AbstractDescentMethod[
+symFn,x0,
+FnForm[G[symFn],GetVars[symFn]],
+FnForm[G[symFn],GetVars[symFn]],
+AbstractBTForFn[(Evaluate@FnForm[symFn]),#1,#2,#3,s,beta,gamma]&,
+tolerance,"GradDescent-BackTracking"
+];
+GradientWithBT[symFn_,x0_,tolerance_]:=GradientWithBT[
+symFn,x0,tolerance,$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+
+GradientWithFDsAndELS[symFn_,x0_,tolerance_]:=AbstractDescentMethod[
+symFn,x0,
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"GradDescent-FiniteDiffs-ExactLineSearch"
+];
+
+GradientWithFDsAndBT[symFn_,x0_,tolerance_,s_,beta_,gamma_]:=AbstractDescentMethod[
+symFn,x0,
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+AbstractBTForFn[(Evaluate@FnForm[symFn]),#1,#2,#3,s,beta,gamma]&,
+tolerance,"GradDescent-FiniteDiffs-BackTracking"
+];
+GradientWithFDsAndBT[symFn_,x0_,tolerance_]:=GradientWithFDsAndBT[
+symFn,x0,tolerance,$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+
+(*-------------------------------------------------------------------------------------*)
+(*------------------------------ Newton descent methods -------------------------------*)
+NewtonWithELS[symFn_,x0_,tolerance_]:=AbstractDescentMethod[
+symFn,x0,
+FnForm[G[symFn],GetVars[symFn]],
+ActualNewtonStepDirectionAtPointFn[symFn],
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"NewtonDescent-ExactLineSearch"
+];
+
+NewtonWithBT[symFn_,x0_,tolerance_,s_,beta_,gamma_]:=AbstractDescentMethod[
+symFn,x0,
+FnForm[G[symFn],GetVars[symFn]], (*ActualGradientAtPointFn[(Evaluate@FnForm[symFn]),#]&,*)
+ActualNewtonStepDirectionAtPointFn[symFn],
+AbstractBTForFn[(Evaluate@FnForm[symFn]),#1,#2,#3,s,beta,gamma]&,
+tolerance,"NewtonDescent-BackTracking"
+];
+NewtonWithBT[symFn_,x0_,tolerance_]:=NewtonWithBT[symFn,x0,tolerance,
+$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+Quasi-Newton algorithms:
+BFGS:
+(*------- Quasi-Newton - the way Broyden, Fletcher, Goldfarb, and Shanno do. -------*)
+(*------- Hk = Bk^-1 = (approximate) (Hess^-1) -------*)
+AbstractBFGSQuasiNewton[objectiveFunctionSymFn_,x0_,H0_,
+gradientFn_,
+(*antiStepDirectionFromPointFn_,*)
+lineSearchFnForFn_,
+tolerance_,nickNameOfDescentMethod_,
+maxIterations_]:=Module[{
+(*antiStepDirectionFromPointFn=LinearSolve[#1,-#2,Method\[Rule]"Cholesky"]&,*)
+antiStepDirectionFromPointFn=LinearSolve[#1,-#2]&,
+vars,fn,
+actualSolnAndVal,actualSoln,
+foundSoln,results,
+
+gradFnEvaluatedAtXk,
+gradFnEvaluatedAtXkPlus1,
+pk,alphak,
+rhok,
+sk,yk,
+Uk,Vk,
+xk=N@x0,xkPlus1,
+Hk=N@H0,HkPlus1,
+identity=IdentityMatrix[Dimensions@H0],
+approximatedHessians={},
+
+(*step,
+steps={ZeroVector@2},
+gradients={},
+xkMinus1=N@x0*)
+tol=N@tolerance,
+maxIters=N@maxIterations,
+iters=0,
+iterates={},
+totalRunningTime,
+stepLengthCalculationTime,
+stepDirectionCalculationTime,
+timed
+},(
+stepLengthCalculationTime=0;
+stepDirectionCalculationTime=0;
+
+(*Print@StringForm[
+"objectiveFunctionSymFn: `` \nx0: `` \nB0: `` \ngradientFn: `` \nantiStepDirectionFromPointFn: `` \nlineSearchFnForFn: `` \ntolerance: `` \nnickNameOfDescentMethod: `` \nmaxIterations: ``\n" ,
+objectiveFunctionSymFn,x0,MatrixForm@B0,gradientFn,antiStepDirectionFromPointFn,lineSearchFnForFn,tolerance,nickNameOfDescentMethod,maxIterations];*)
+
+vars=GetVars[objectiveFunctionSymFn];
+fn=FnForm[objectiveFunctionSymFn];
+
+
+totalRunningTime=First@Timing[
+
+gradFnEvaluatedAtXk=gradientFn[xk];
+
+stepDirectionCalculationTime+=First@Timing[
+pk=-Hk.gradFnEvaluatedAtXk;
+rhok=1/(yk.sk);
+HkPlus1=((identity - TensorProduct[sk,yk]*rhok).Hk. (identity - TensorProduct[yk,sk]*rhok))+TensorProduct[sk,sk]*rhok
+];
+
+stepLengthCalculationTime+=First@Timing[
+alphak=lineSearchFnForFn[xk,pk,gradFnEvaluatedAtXk]
+];
+
+xkPlus1=xk+alphak*pk;
+
+sk=xkPlus1-xk;
+yk=gradFnEvaluatedAtXkPlus1-gradFnEvaluatedAtXk;
+gradFnEvaluatedAtXkPlus1=gradientFn[xkPlus1];
+
+AppendTo[iterates,Append[xk,fn[xk]]];
+
+While[Norm[gradFnEvaluatedAtXk]>= tol ,(
+
+If[++iters>maxIters,(Print[StringForm[
+"`` didn't converge within `` iterations for the function: `` \nReturning the results now - try passing them to PlotResults2D or PrettyResults. \nIf everything looks fine and you'd like to continue executing the algorithm from where it left off, try passing the results to the ContinueDescent function along with (optionally) a new maximimum number of iterations and tolerance.",
+nickNameOfDescentMethod,TraditionalForm@maxIterations,TraditionalForm@objectiveFunctionSymFn]];
+Break[];
+)];
+
+AppendTo[approximatedHessians,Hk];
+
+timed=Timing[
+pk=-Hk.gradFnEvaluatedAtXk;
+rhok=1/(yk.sk);
+HkPlus1=((identity - TensorProduct[sk,yk]*rhok).Hk. (identity - TensorProduct[yk,sk]*rhok))+TensorProduct[sk,sk]*rhok;
+];
+stepDirectionCalculationTime+=First@timed;
+
+timed=Timing[
+alphak=lineSearchFnForFn[xk,pk,gradFnEvaluatedAtXk]
+];
+stepLengthCalculationTime+=First@timed;
+
+xkPlus1=xk+alphak*pk;
+
+sk=xkPlus1-xk;
+yk=gradFnEvaluatedAtXkPlus1-gradFnEvaluatedAtXk;
+gradFnEvaluatedAtXkPlus1=gradientFn[xkPlus1];
+
+
+
+(*Uk=TensorProduct[yk,yk]/(yk.sk);
+Vk=(Bk.TensorProduct[sk,sk].Bk)/(sk.Bk.sk);
+BkPlus1=Bk+Uk-Vk;*)
+
+xk=xkPlus1;
+gradFnEvaluatedAtXk=gradFnEvaluatedAtXkPlus1;
+Hk=HkPlus1;
+AppendTo[iterates,Append[xk,fn[xk]]];
+(*AppendTo[gradients,gradFnEvaluatedAtXk];*)
+)];
+];
+
+foundSoln=Last@iterates;
+actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[objectiveFunctionSymFn,vars];
+(*actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[fn[(vars/.List\[Rule]Sequence)],vars];*)
+
+results=<|
+"nickName"->nickNameOfDescentMethod,
+"objectiveFunctionSymFn"->objectiveFunctionSymFn,
+"vars"->vars,
+"x0"->First@iterates,
+(*"gradients"\[Rule]gradients,
+"steps"\[Rule]steps, *)
+"foundSoln"->foundSoln,
+"actualSoln"->actualSoln,
+"distanceFromActual"->Norm[foundSoln[[;;-2]]-actualSoln[[;;-2]]],
+"differenceFromActual"->Abs[foundSoln[[-1]]-actualSoln[[-1]]],
+"iterations"->iters,
+"iterates"->iterates,
+"approximatedHessians"->approximatedHessians,
+
+"totalRunningTime"->totalRunningTime,
+"stepDirectionCalculationTime"->stepDirectionCalculationTime,
+"stepLengthCalculationTime"->stepLengthCalculationTime,
+
+"parameters"-><|
+"tolerance"->tol,
+"gradientFn"->gradientFn,
+"antiStepDirectionFromPointFn"->antiStepDirectionFromPointFn,
+"lineSearchFnForSymFn"->lineSearchFnForFn,
+"maxIterations"->maxIterations
+|>
+
+|>;
+
+(*results=Join[results,<|"convergenceAnalysisData"\[Rule]ConvergenceAnalysisOfDescentMethod[results]|>];*)
+Return@results;
+)];
+AbstractBFGSQuasiNewton[objectiveFunctionSymFn_,x0_,H0_,
+gradientFn_,
+lineSearchFnForFn_,
+tolerance_,nickNameOfDescentMethod_]:=AbstractBFGSQuasiNewton[
+objectiveFunctionSymFn,x0,H0,
+gradientFn,
+lineSearchFnForFn,
+tolerance,nickNameOfDescentMethod,
+$DefaultMaxIterations];
+Concrete descent methods, "subclassed" from AbstractBFGSQuasiNewton
+BFGSQuasiNewtonWithELS[symFn_,x0_,tolerance_]:=AbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FnForm[G[symFn],GetVars[symFn]],
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"QuasiNewton(BFGS)-ExactLineSearch"];
+
+BFGSQuasiNewtonWithFDsAndELS[symFn_,x0_,tolerance_]:=AbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"QuasiNewton(BFGS)-FiniteDiffs-ExactLineSearch"];
+
+BFGSQuasiNewtonWithFDsAndBT[symFn_,x0_,tolerance_,s_,beta_,gamma_]:=AbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+AbstractBTForFn[(Evaluate@FnForm[symFn]),#1,#2,#3,s,beta,gamma]&,
+tolerance,"QuasiNewton(BFGS)-FiniteDiffs-BackTracking"];
+BFGSQuasiNewtonWithFDsAndBT[symFn_,x0_,tolerance_]:=BFGSQuasiNewtonWithFDsAndBT[symFn,x0,tolerance,
+$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+OLDBFGS:
+(*------- Quasi-Newton - the way Broyden, Fletcher, Goldfarb, and Shanno do. -------*)
+OLDAbstractBFGSQuasiNewton[objectiveFunctionSymFn_,x0_,B0_,
+gradientFn_,
+(*antiStepDirectionFromPointFn_,*)
+lineSearchFnForFn_,
+tolerance_,nickNameOfDescentMethod_,
+maxIterations_]:=Module[{
+(*antiStepDirectionFromPointFn=LinearSolve[#1,-#2,Method\[Rule]"Cholesky"]&,*)
+antiStepDirectionFromPointFn=LinearSolve[#1,-#2]&,
+vars,fn,
+actualSolnAndVal,actualSoln,
+foundSoln,results,
+
+gradFnEvaluatedAtXk,
+gradFnEvaluatedAtXkPlus1,
+pk,alphak,
+sk,yk,
+Uk,Vk,
+xk=N@x0,xkPlus1,
+Bk=N@B0,BkPlus1,
+approximatedHessians={},
+
+(*step,
+steps={ZeroVector@2},
+gradients={},
+xkMinus1=N@x0*)
+tol=N@tolerance,
+maxIters=N@maxIterations,
+iters=0,
+iterates={},
+totalRunningTime,
+stepLengthCalculationTime,
+stepDirectionCalculationTime,
+timed
+},(
+stepLengthCalculationTime=0;
+stepDirectionCalculationTime=0;
+
+(*Print@StringForm[
+"objectiveFunctionSymFn: `` \nx0: `` \nB0: `` \ngradientFn: `` \nantiStepDirectionFromPointFn: `` \nlineSearchFnForFn: `` \ntolerance: `` \nnickNameOfDescentMethod: `` \nmaxIterations: ``\n" ,
+objectiveFunctionSymFn,x0,MatrixForm@B0,gradientFn,antiStepDirectionFromPointFn,lineSearchFnForFn,tolerance,nickNameOfDescentMethod,maxIterations];*)
+
+vars=GetVars[objectiveFunctionSymFn];
+fn=FnForm[objectiveFunctionSymFn];
+
+totalRunningTime=First@Timing[
+
+gradFnEvaluatedAtXk=gradientFn[xk];
+
+AppendTo[iterates,Append[xk,fn[xk]]];
+(*AppendTo[gradients,gradFnEvaluatedAtXk];*)
+
+While[Norm[gradFnEvaluatedAtXk]>= tol ,(
+
+If[++iters>maxIters,(Print[StringForm[
+"`` didn't converge within `` iterations for the function: `` \nReturning the results now - try passing them to PlotResults2D or PrettyResults. \nIf everything looks fine and you'd like to continue executing the algorithm from where it left off, try passing the results to the ContinueDescent function along with (optionally) a new maximimum number of iterations and tolerance.",
+nickNameOfDescentMethod,TraditionalForm@maxIterations,TraditionalForm@objectiveFunctionSymFn]];
+Break[];
+)];
+
+(*pk=LinearSolve[Bk,-gradFnEvaluatedAtXk,Method\[Rule]"Cholesky"];*)
+(*timed=Timing[LinearSolve[Bk,-gradFnEvaluatedAtXk,Method\[Rule]"Cholesky"]];*)
+timed=Timing[LinearSolve[Bk,-gradFnEvaluatedAtXk]];
+stepDirectionCalculationTime+=First@timed;
+pk=Last@timed;
+
+(*alphak=lineSearchFnForFn[xk,pk,gradFnEvaluatedAtXk];*)
+timed=Timing[lineSearchFnForFn[xk,pk,gradFnEvaluatedAtXk]];
+stepLengthCalculationTime+=First@timed;
+alphak=Last@timed;
+
+sk=alphak*pk;
+
+xkPlus1=xk+sk;
+
+gradFnEvaluatedAtXkPlus1=gradientFn[xkPlus1];
+
+yk=gradFnEvaluatedAtXkPlus1-gradFnEvaluatedAtXk;
+
+Uk=TensorProduct[yk,yk]/(yk.sk);
+Vk=(Bk.TensorProduct[sk,sk].Bk)/(sk.Bk.sk);
+BkPlus1=Bk+Uk-Vk;
+
+xk=xkPlus1;
+gradFnEvaluatedAtXk=gradFnEvaluatedAtXkPlus1;
+Bk=BkPlus1;
+AppendTo[approximatedHessians,Bk];
+AppendTo[iterates,Append[xk,fn[xk]]];
+(*AppendTo[gradients,gradFnEvaluatedAtXk];*)
+)];
+];
+
+foundSoln=Last@iterates;
+actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[objectiveFunctionSymFn,vars];
+(*actualSoln=Append[(vars/.Last@#),First@#]&@NMinimize[fn[(vars/.List\[Rule]Sequence)],vars];*)
+
+results=<|
+"nickName"->nickNameOfDescentMethod,
+"objectiveFunctionSymFn"->objectiveFunctionSymFn,
+"vars"->vars,
+"x0"->First@iterates,
+(*"gradients"\[Rule]gradients,
+"steps"\[Rule]steps, *)
+"foundSoln"->foundSoln,
+"actualSoln"->actualSoln,
+"distanceFromActual"->Norm[foundSoln[[;;-2]]-actualSoln[[;;-2]]],
+"differenceFromActual"->Abs[foundSoln[[-1]]-actualSoln[[-1]]],
+"iterations"->iters,
+"iterates"->iterates,
+"approximatedHessians"->approximatedHessians,
+
+"totalRunningTime"->totalRunningTime,
+"stepDirectionCalculationTime"->stepDirectionCalculationTime,
+"stepLengthCalculationTime"->stepLengthCalculationTime,
+
+"parameters"-><|
+"tolerance"->tol,
+"gradientFn"->gradientFn,
+"antiStepDirectionFromPointFn"->antiStepDirectionFromPointFn,
+"lineSearchFnForSymFn"->lineSearchFnForFn,
+"maxIterations"->maxIterations
+|>
+
+|>;
+
+(*results=Join[results,<|"convergenceAnalysisData"\[Rule]ConvergenceAnalysisOfDescentMethod[results]|>];*)
+Return@results;
+)];
+OLDAbstractBFGSQuasiNewton[objectiveFunctionSymFn_,x0_,B0_,
+gradientFn_,
+lineSearchFnForFn_,
+tolerance_,nickNameOfDescentMethod_]:=OLDAbstractBFGSQuasiNewton[
+objectiveFunctionSymFn,x0,B0,
+gradientFn,
+lineSearchFnForFn,
+tolerance,nickNameOfDescentMethod,
+$DefaultMaxIterations];
+Concrete descent methods, "subclassed" from OLDAbstractBFGSQuasiNewton
+OLDBFGSQuasiNewtonWithELS[symFn_,x0_,tolerance_]:=OLDAbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FnForm[G[symFn],GetVars[symFn]],
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"QuasiNewton(BFGS)-ExactLineSearch"];
+
+OLDBFGSQuasiNewtonWithFDsAndELS[symFn_,x0_,tolerance_]:=OLDAbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+ExactLineSearchForFn[(Evaluate@FnForm[symFn]),#1,#2,#3]&,
+tolerance,"QuasiNewton(BFGS)-FiniteDiffs-ExactLineSearch"];
+
+OLDBFGSQuasiNewtonWithFDsAndBT[symFn_,x0_,tolerance_,s_,beta_,gamma_]:=OLDAbstractBFGSQuasiNewton[
+symFn,x0,IdentityMatrix[Length@x0],
+FastFFDApproxGradAtPointForFn[(Evaluate@FnForm[symFn]),#]&,
+AbstractBTForFn[(Evaluate@FnForm[symFn]),#1,#2,#3,s,beta,gamma]&,
+tolerance,"QuasiNewton(BFGS)-FiniteDiffs-BackTracking"];
+OLDBFGSQuasiNewtonWithFDsAndBT[symFn_,x0_,tolerance_]:=OLDBFGSQuasiNewtonWithFDsAndBT[symFn,x0,tolerance,
+$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+Discrete Projection
+(* Not sure what to call this.
+Takes a point, and a list of boundary points (i.e. the vertices of a convex hull). Returns the projected point (which lies on the convex hull). *)
+DiscreteProjection[point_,boundaryPoints_]:=Module[{i,pi,p=point,bnds=Sort/@boundaryPoints,lbnd=-Infinity,ubnd=Infinity},(
+For[i=1,i<=Length@p,i++,(
+{lbnd,ubnd}=bnds[[i]];
+pi=p[[i]];
+If[pi<lbnd,p[[i]]=lbnd];
+If[pi>ubnd,p[[i]]=ubnd];
+)];
+Return@p;
+)];
+(*DiscreteProjection[{1.99999,3.5},{{0,2},{3,4}}]
+DiscreteProjection[{2.99999,3.5},{{0,2},{3,4}}]*)
+Extra descent method related things:
+Continue executing a descent method
+(* Pass me the results from a descent method! And a new maxIterations and tolerance, if you want to. *)
+ContinueDescent[results_,maxIterations_,tolerance_]:=Module[{params=results["parameters"]},(
+Return[AbstractDescentMethod[
+results["objectiveFunctionSymFn"],
+results["foundSoln"][[;;-2]],
+params["gradientFn"],
+params["antiStepDirectionFromPointFn"],
+params["lineSearchFnForSymFn"],
+tolerance,
+results["nickName"],
+maxIterations
+]];
+)];
+ContinueDescent[results_,maxIterations_]:=ContinueDescent[results,maxIterations,results["parameters"]["tolerance"]];
+ContinueDescent[results_]:=ContinueDescent[results,results["parameters"]["maxIterations"],results["parameters"]["tolerance"]];
+Check out some convergence analysis info.
+(*ConditionNumber[symFn_]:=((Max[#]/Min[#])&@Eigenvalues[H[symFn]]);*)
+HessianAtPoint[symFn_,point_]:=EvalSymFnAtPoint[H@symFn,GetVars@symFn,point];
+ConditionNumberFromEigenVals[eigenVals_]:=((Max[#]/Min[#])&@eigenVals);
+ConditionNumberOfMatrix[matrix_]:=ConditionNumberFromEigenVals[Eigenvalues[matrix]];
+ConditionNumberAtPoint[symFn_,point_]:=ConditionNumberOfMatrix[HessianAtPoint[symFn,point]];
+ConvergenceAnalysisDataAtPoint[symFn_,point_]:=Module[{grad,hess,vars,eigVals},(
+vars=GetVars@symFn;
+grad=EvalSymFnAtPoint[G@symFn,vars,point];
+hess=EvalSymFnAtPoint[H@symFn,vars,point];
+eigVals=Eigenvalues[hess];
+Return@N@Association[{
+"Point"->point,
+"Gradient"->grad,
+"GradientMagnitude"->Norm@grad,
+"Hessian"->hess,
+"HessianDeterminant"->Det@hess,
+"Eigenvalues"->eigVals,
+"ConditionNumber"->ConditionNumberFromEigenVals@eigVals
+}];
+)];
+ConvergenceAnalysisOfDescentMethod[testResults_]:=ConvergenceAnalysisDataAtPoint[
+testResults["objectiveFunctionSymFn"],testResults["foundSoln"][[;;-2]]];
+
+Examples:
+Examples I:
+(*testFns=SetVars[#,{x,y}]&/@{testFn=x^1 + (x+y)^2 + (y -1)^2,testFn2=x^4 + (x+y)^2 + (E^y -1)^2,testFn3=Sin[x]^2 + Cos[y]^2};
+initialPoints={p0={-1,3},p1={1,1},p2={2,5}};*)
+Module[{initialPoints,testFns,gradientDescentMethods,newtonDescentMethods,tol},(
+tol=N[10^(-1)];
+(*initialPoints={{-1,3},{1,1},{2,5}};*)
+initialPoints={{-1,3}(*,{1,1},{2,5}*)};
+testFns=SetVars[#,{x,y}]&/@{x+(-1+y)^2+(x+y)^2,(-1+E^y)^2+x^4+(x+y)^2,Cos[y]^2+Sin[x]^2};
+gradientDescentMethods={
+GradientWithELS[#1,#2,tol]&,
+GradientWithFDsAndELS[#1,#2,tol]&,
+GradientWithFDsAndBT[#1,#2,tol,1,0.5,0.5]&
+};
+newtonDescentMethods={
+NewtonWithELS[#1,#2,tol]&,
+NewtonWithBT[#1,#2,tol,1,0.5,0.5]&
+};
+GeneratePlotsTable@Flatten@{
+Table[method[fnToTest,initialPoint],{method,gradientDescentMethods},{fnToTest,testFns},{initialPoint,initialPoints}],
+Table[method[fnToTest,initialPoint],{method,newtonDescentMethods},{fnToTest,testFns},{initialPoint,initialPoints}]}
+)]
+Examples II:
+GeneratePlotsGrid@RunTests[SetVars[(y+1/x)^2+(x+1/y)^2+(1/x+1/y)^2+(x+y)^2,{x,y}],{10,-10},.001]
+Examples III:
+Module[{lotsOfVars={x,y,z,p,q,r,s,t,u,v,w},
+convexFunctionOfLotsOfVars,randomInitialPoint},(
+convexFunctionOfLotsOfVars=Total[#^2&/@lotsOfVars];
+randomInitialPoint=RandomReal[{-100,100},Length@lotsOfVars];
+PrettyResults[NewtonWithELS[SetVars[(convexFunctionOfLotsOfVars),lotsOfVars],randomInitialPoint,10^(-8)] ,4]
+)]
+Examples IV:
+PlotResults2D@GradientWithFDsAndBT[SetVars[(x^12+y^12),{x,y}],{-1,1},10^(-1)]
+PlotResults2D@NewtonWithBT[SetVars[(x^12+y^12),{x,y}],{-100,100},10^(-1)]
+PlotResults2D@GradientWithELS[SetVars[(x^12+y^12),{x,y}],{-1,1},10^(-1)]
+PlotResults2D@NewtonWithELS[SetVars[(x^12+y^12),{x,y}],{-100,100},10^(-1)]
+
+(*PlotResults2D@GradientWithFDsAndBT[SetVars[(Cos[Abs@x]+Sin[Abs@y]),{x,y}],{-2,2},10^(-1)]
+PlotResults2D@NewtonWithBT[SetVars[(Cos[Abs@x]+Sin[Abs@y]),{x,y}],{-2,2},10^(-1)]
+PlotResults2D@GradientWithELS[SetVars[(Cos[Abs@x]+Sin[Abs@y]),{x,y}],{-2,2},10^(-1)]*)
+(*PlotResults2D@NewtonWithELS[SetVars[(Cos[Abs@x]+Sin[Abs@y]),{x,y}],{-2,2},10^(-1)]*)
+PlotResults2D@NewtonWithELS[SetVars[(Cos[x]^2+Sin[y]^2),{x,y}],{10.1,1.1},0.01]
+
+PlotResults2D@GradientWithFDsAndBT[SetVars[Sqrt@(Cos[x^3]^2+Sin[y^4]),{x,y}],{-.2,.3},10^(-1)]
+PlotResults2D@NewtonWithBT[SetVars[N@Sqrt@(Cos[x^3]^2+Sin[y^4]),{x,y}],{-.2,.3},10^(-1)]
+PlotResults2D@GradientWithELS[SetVars[Sqrt@(Cos[x^3]^2+Sin[y^4]),{x,y}],{-.2,.3},10^(-1)]
+PlotResults2D@NewtonWithELS[SetVars[Sqrt@(Cos[x^3]^2+Sin[y^4]),{x,y}],{-.2,.3},10^(-1)]
+Examples V:
+Module[{testFn,testFn2,p0={-1,3}(*,p1={1,1},p2={2,5}*)},(
+{testFn,testFn2}=SetVars[#,{x,y}]&/@{x^4+(1+y)^2+(x+y)^2,(-1+E^y)^2+x^4+(x+y)^2};
+
+GeneratePlotsTable[{
+GradientWithELS[testFn,p0,N[10^(-#)]],
+GradientWithFDsAndELS[testFn,p0,N[10^(-#)]],
+GradientWithFDsAndBT[testFn,p0,N[10^(-#)],1,0.5,0.5],
+NewtonWithELS[testFn,p0,N[10^(-#)]],
+NewtonWithBT[testFn,p0,N[10^(-#)],1,0.5,0.5],
+
+GradientWithELS[testFn2,p0,N[10^(-#)]],
+GradientWithFDsAndELS[testFn2,p0,N[10^(-#)]],
+GradientWithFDsAndBT[testFn2,p0,N[10^(-#)],1,0.5,0.5],
+NewtonWithELS[testFn2,p0,N[10^(-#)]],
+NewtonWithBT[testFn2,p0,N[10^(-#)],1,0.5,0.5]
+}]&@2
+)]
+Examples VI:
+GeneratePlotsTable@RunTests[SetVars[x^4 + (x+y)^2 + (y +1)^2,{x,y}],{-101,1},10^(-2)]
+Select Homework Problems:
+Homework #5:
+Problem 1.
+(*HW5p1SymFn=SetVars[2*x1^2 +3*x2^2+4*x3^2+2*x1*x2-2*x1*x3-8*x1-4*x2-2*x3,{x1,x2,x3}];
+HW5p1x0={17/7,0,6/7};
+HW5p1Tol=N[10^(-3)];*)
+(*HW5p1OptimalityCondSymFn=SetVars[G[HW5p1SymFn].({y1,y2,y3}-{x1,x2,x3}),{y1,y2,y3,x1,x2,x3}];
+G[HW5p1SymFn]
+G[HW5p1SymFn]//MatrixForm
+G[HW5p1SymFn]/.Thread[{x1,x2,x3}\[Rule]HW5p1x0]//MatrixForm
+HW5p1OptimalityCondSymFn
+HW5p1OptimalityCondSymFn//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{c,0,0}]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{0,c,0}]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{0,0,c}]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{17/7,0,0}]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{0,0,0}]//Expand
+HW5p1OptimalityCondSymFn/.Thread[{x1,x2,x3}\[Rule]HW5p1x0+{0,0,6/7}]//Expand
+HW5p1OptimalityCondSymFn//QuadraticFunctionQ*)
+
+(*ParameterizedTest[HW5p1SymFn,HW5xStar,HW5p1Tol]@OLDBFGSQuasiNewtonWithFDsAndBT//PlotResults2D*)
+HW5p1SymFn=SetVars[2*x1^2 +3*x2^2+4*x3^2+2*x1*x2-2*x1*x3-8*x1-4*x2-2*x3,{x1,x2,x3}];
+HW5p1x0={17/7,0,6/7};
+HW5p1Tol=N[10^(-3)];
+
+xStar={17/7,0,6/7};
+xMinusXStar=Rationalize[({x1,x2,x3}-xStar)];xMinusXStar//MatrixForm
+
+(*Thread[{x1,x2,x3}\[Rule]{17/7,0,6/7}]*)
+grad=Rationalize@G[HW5p1SymFn];
+gradAtXStar=Rationalize[grad/.{x1->17/7,x2->0,x3->6/7}];gradAtXStar//MatrixForm
+
+fnToCheckOptimalityCond1Necessary=Rationalize[gradAtXStar.xMinusXStar];
+SetVars[fnToCheckOptimalityCond1Necessary,{x1,x2,x3}]
+
+hess=Rationalize@H[HW5p1SymFn];
+hessAtXStar=Rationalize[hess/.{x1->17/7,x2->0,x3->6/7}];
+fnToCheckOptimalityCond2Necessary=Rationalize[xMinusXStar.hessAtXStar.xMinusXStar];
+SetVars[fnToCheckOptimalityCond2Necessary,{x1,x2,x3}];
+
+fnToCheckOptimalityCond2Sufficient=Rationalize[fnToCheckOptimalityCond2Necessary/(Norm[xMinusXStar]^2)];
+SetVars[fnToCheckOptimalityCond2Sufficient,{x1,x2,x3}];
+
+(*xMinusXStar//MatrixForm
+grad//MatrixForm*)
+gradAtXStar//MatrixForm
+
+(*hess//MatrixForm*)
+MatrixForm[hessAtXStar]
+(*MatrixForm/@Eigensystem@[hessAtXStar]*)
+
+fnToCheckOptimalityCond1Necessary//Expand
+fnToCheckOptimalityCond2Necessary//Expand
+fnToCheckOptimalityCond2Sufficient//Expand
+
+
+conds=(x1>=0&&x2>=0&&x3>=0);
+"orig"
+Minimize[{Rationalize[HW5p1SymFn],conds},{x1,x2,x3}]
+
+"cond 1 necessary: >= 0"
+Minimize[{Rationalize@fnToCheckOptimalityCond1Necessary,conds},{x1,x2,x3}]
+%//First//#>=0&
+
+"cond 2 necessary"
+Minimize[{Rationalize@fnToCheckOptimalityCond2Necessary,conds},{x1,x2,x3}]
+%//First//#>= 0&
+
+"cond 2 sufficient"
+Minimize[{Rationalize@fnToCheckOptimalityCond2Sufficient,conds},{x1,x2,x3}]
+%//First//#>0&
+Problem 4.
+x=.;y=.;
+Module[{l,ans,
+z={5,10},
+c={0,0},
+rSqrd=4,
+symFn,
+ProjOntoB,
+points
+},(
+symFn=(x^2+y^2);
+l=z-c;
+ProjOntoB=(l/Norm[l])*Sqrt[rSqrd];
+points={{c},{ProjOntoB},{z}};
+Print[MatrixForm/@points];
+
+Show[
+RegionPlot[symFn<=rSqrd,{x,-2,6},{y,-2,11},AspectRatio->13/8],
+ListPlot[points,PlotStyle->Directive[PointSize[.025]]],
+Plot[(z[[2]]/z[[1]])x,{x,-2,6},PlotStyle->{Dashed,Thin,Red}],
+ImageSize->Medium]
+)]
+{(0 0
+
+),(2/Sqrt[5]    4/Sqrt[5]
+
+),(5    10
+
+)}
+{2/Sqrt[5],4/Sqrt[5]}
+
+
+Problem 5.
+HW5p5SymFn=Rationalize@SetVars[0.5*(x1^2 +x2^2+0.1*x3^2)+0.55*x3,{x1,x2,x3}];
+HW5p5x0={0.5,0.5,0};
+HW5p5Tol=N[10^(-3)];
+
+xStar={.5,.5,0};
+xMinusXStar=({x1,x2,x3}-xStar);
+
+grad=Rationalize@G[HW5p5SymFn];
+gradAtXStar=grad/.{x1->.5,x2->.5,x3->0};
+
+fnToCheckOptimalityCond1Necessary=gradAtXStar.xMinusXStar;
+SetVars[fnToCheckOptimalityCond1Necessary,{x1,x2,x3}];
+
+hess=Rationalize@H[HW5p5SymFn];
+hessAtXStar=hess/.{x1->.5,x2->.5,x3->0};
+fnToCheckOptimalityCond2Necessary=xMinusXStar.hessAtXStar.xMinusXStar;
+SetVars[fnToCheckOptimalityCond2Necessary,{x1,x2,x3}];
+
+
+fnToCheckOptimalityCond2Sufficient=Rationalize[fnToCheckOptimalityCond2Necessary/(Norm[Rationalize@xMinusXStar]^2)];
+SetVars[fnToCheckOptimalityCond2Sufficient,{x1,x2,x3}];
+
+(*xMinusXStar//MatrixForm
+grad//MatrixForm*)
+gradAtXStar//MatrixForm
+
+(*hess//MatrixForm*)
+hessAtXStar//MatrixForm
+
+fnToCheckOptimalityCond1Necessary//Expand//N
+fnToCheckOptimalityCond2Necessary//Expand//N
+fnToCheckOptimalityCond2Sufficient//Expand//N
+
+Eigensystem@hess
+
+conds=(x1+x2+x3==1&&x1>=0&&x2>=0&&x3>=0);
+"orig"
+Minimize[{Rationalize[HW5p5SymFn],conds},{x1,x2,x3}]
+
+"cond 1 necessary: >= 0"
+Minimize[{Rationalize@fnToCheckOptimalityCond1Necessary,conds},{x1,x2,x3}]
+%//First//#>=0&
+
+"cond 2 necessary"
+Minimize[{Rationalize@fnToCheckOptimalityCond2Necessary,conds},{x1,x2,x3}]
+%//First//#>= 0&
+
+"cond 2 sufficient"
+Minimize[{Rationalize@fnToCheckOptimalityCond2Sufficient,conds},{x1,x2,x3}]
+%//First//#>0&
+
+(*ParameterizedTest[HW5p5SymFn,HW5p5x0,HW5p5Tol]@OLDBFGSQuasiNewtonWithFDsAndBT//PlotResults2D*)
+Homework #4:
+Problem 1.
+HW4p1SymFn=SetVars[x1^4 + (x1+x2)^2 + (E^x2 -1)^2,{x1,x2}];
+HW4p1x0a={1,1};
+HW4p1x0b={-1,3};
+tol=N[10^(-8)];
+
+PlotResults2D@GradientWithELS[HW4p1SymFn,HW4p1x0a,tol]
+PlotResults2D@GradientWithBT[HW4p1SymFn,HW4p1x0a,tol]
+PlotResults2D@NewtonWithELS[HW4p1SymFn,HW4p1x0a,tol]
+PlotResults2D@NewtonWithBT[HW4p1SymFn,HW4p1x0a,tol]
+
+PlotResults2D@GradientWithELS[HW4p1SymFn,HW4p1x0b,tol]
+PlotResults2D@GradientWithBT[HW4p1SymFn,HW4p1x0b,tol]
+PlotResults2D@NewtonWithELS[HW4p1SymFn,HW4p1x0b,tol]
+PlotResults2D@NewtonWithBT[HW4p1SymFn,HW4p1x0b,tol]
+
+
+DoParameterizedTest[HW4p1SymFn,HW4p1x0b,tol]
+CompareMethods[{DoParameterizedTest[HW4p1SymFn,HW4p1x0b,tol]},{GradientWithELS}]
+Homework #3:
+Problem 1 a, b, c.
+HW3p1SymFn=SetVars[(100*x2-x1)^2+(1-x1)^2,{x1,x2}];
+HW3p1x0={2,5};
+tol=N[10^(-8)];
+
+PlotResults2D@GradientWithELS[HW3p1SymFn,HW3p1x0,tol]
+PlotResults2D@NewtonWithELS[HW3p1SymFn,HW3p1x0,tol]
+PlotResults2D@NewtonWithBT[HW3p1SymFn,HW3p1x0,tol]
+Problem 2 a.i, b.i, c.i.
+HW3p2iSymFn=SetVars[(100*x1^4+0.01*x2^4),{x1,x2}];
+HW3p2x0={1,1};
+HW3p2Tol=N[10^(-8)];
+
+(*HW3p2iResults=Module[{symFn,x0,s=1,beta=.5,gamma=.5},(
+symFn=HW3p2iSymFn;
+x0=HW3p2x0;
+{
+GradientWithELS[symFn,x0,#],
+NewtonWithELS[symFn,x0,#],
+NewtonWithBT[symFn,x0,#,s,beta,gamma]
+}
+)]&@HW3p2Tol;*)
+
+PlotResults2D@GradientWithELS[HW3p2iSymFn,HW3p2x0,HW3p2Tol]
+PlotResults2D@NewtonWithELS[HW3p2iSymFn,HW3p2x0,HW3p2Tol]
+PlotResults2D@NewtonWithBT[HW3p2iSymFn,HW3p2x0,HW3p2Tol]
+(*PlotResults2D@HW3p2iResults[[1]]
+PlotResults2D@HW3p2iResults[[2]]
+PlotResults2D@HW3p2iResults[[3]]*)
+
+Problem 2 a.ii, b.ii, c.ii.
+HW3p2iiSymFn=SetVars[Sqrt[(x1^2+1)]+ Sqrt[(x2^2+1)],{x1,x2}];
+HW3p2x0={1,1};
+HW3p2Tol=10^(-8);
+
+(*HW3p2iiResults=Module[{symFn,x0,s=1,beta=.5,gamma=.5},(
+symFn=HW3p2iiSymFn;
+x0=HW3p2x0;
+{
+GradientWithELS[symFn,x0,#],
+NewtonWithELS[symFn,x0,#],
+NewtonWithBT[symFn,x0,#,s,beta,gamma]
+}
+)]&@HW3p2Tol;*)
+
+PlotResults2D@GradientWithELS[HW3p2iiSymFn,HW3p2x0,HW3p2Tol]
+PlotResults2D@NewtonWithELS[HW3p2iiSymFn,HW3p2x0,HW3p2Tol]
+PlotResults2D@NewtonWithBT[HW3p2iiSymFn,HW3p2x0,HW3p2Tol]
+(*PlotResults2D@HW3p2iiResults[[1]]
+PlotResults2D@HW3p2iiResults[[2]]
+PlotResults2D@HW3p2iiResults[[3]]*)
+Homework #2:
+Problem 1a.
+hw1p1symfn=5*x1^2-9*x1*x2+4.075*x2^2+x1;
+hw1x0={1,1};
+hwTol=3*10^-6;
+fn[x_]:=x[[1]]^2 - 2*x[[1]]*x[[2]] + x[[2]]^2  + 2*x[[1]] - 2*x[[2]];
+xk={0,1-5^-k};
+RecurrenceTable
+pk=2*{};
+alpha=(a/.Last[NMinimize[(fn[xk+a*pk]),a]]);
+HW2p1aSymFn=SetVars[5x1^2-9x1*x2+4.075x2^2+x1,{x1,x2}];
+HW2p1x0={1,1};
+HW2p1Tol=3*10^-6//N;
+
+PlotResults2D@GradientWithELS[HW2p1aSymFn,HW2p1x0,HW2p1Tol]
+(*PlotResults2D@NewtonWithELS[HW2p1aSymFn,HW2p1x0,HW2p1Tol]*)
+Problem 1b.
+Give a convergence analysis on the above problem (1 a) and explain why the gradient method requires a large number of iterations to reach the solution.
+Problem 2a.
+MatrixForm/@((m={{4,-2},{-2,2}})//Eigensystem)//N
+{vals, vects}=Eigensystem@m
+m//MatrixForm
+
+MatrixForm/@{Transpose[vects],DiagonalMatrix[vals],Inverse@Transpose@vects}
+
+HW2p2aSymFn=SetVars[((x1+5)^2+(x2+8)^2+(x3+7)^2+2x1^2*x2^2+4x1^2 x3^2),{x1,x2,x3}];
+HW2p2x0={1,1,1};
+HW2p2Tol=10^(-6)//N;
+
+ExamineResults@GradientWithELS[HW2p2aSymFn,HW2p2x0,HW2p2Tol]
+Problem 2b.
+Verify the solution point using second order sufficient condition.
+PrettyResults@NewtonWithELS[HW2p2aSymFn,HW2p2x0,HW2p2Tol]
+(*PositiveSemidefiniteMatrixQ@HW2p2aHessAtSoln (* Second order sufficient condition. *)*)
+Problem 3.
+HW2p3SymFn=SetVars[(2*x1^2-2*x1*x2+x2^2+2*x1-2*x2),{x1,x2}];
+HW2p3x0={1,1};
+HW2p3Tol=10^(-6)//N;
+
+PlotResults2D@GradientWithELS[HW2p3SymFn,HW2p3x0,HW2p3Tol]
+(*GeneratePlotsGrid@HW2p3Results*)
+
+Tests/Debugging:
+Testing and Comparison Tools:
+(*Needs["Benchmarking`"]; BenchmarkReport[]*)
+ExamineResults[tmpResults_]:=Module[{
+mainPlot=PlotResults2D@tmpResults,
+gradMagPlot,
+symFn=tmpResults["objectiveFunctionSymFn"],
+vars=tmpResults["vars"],
+iterates=tmpResults["iterates"][[;;,;;-2]],
+grad,gradMags,gradMagFn
+},(
+grad=G@symFn;
+gradMagFn=Norm[EvalSymFnAtPoint[grad,vars,#]]&;
+gradMags=ParallelMap[gradMagFn,iterates];
+gradMagPlot=ListPlot[gradMags,PlotTheme->"Detailed",
+PlotLegends->Placed[StringForm["\[LeftDoubleBracketingBar]\[Gradient]f(``)\[RightDoubleBracketingBar] at each iterate `` (``)",Style["Subscript[x, k]",Black,Bold],Style["Subscript[x, k]",Black,Bold],Length@gradMags],Above]];
+Return@TableForm@{
+{mainPlot},
+{""},
+{Show[gradMagPlot,ImageSize->Large]}
+};
+)];
+
+DoParameterizedTest[objectiveFunctionSymFn_,initialPoint_,tolerance_]:=ExamineResults[#[objectiveFunctionSymFn,initialPoint,tolerance]]&;
+ParameterizedTest[objectiveFunctionSymFn_,initialPoint_,tolerance_]:=#[objectiveFunctionSymFn,initialPoint,tolerance]&;
+
+CompareMethods[listOfParamedTests_,listOfMethods_]:=TableForm[
+Partition[Table[test[method],{method,listOfMethods},{test,listOfParamedTests}],Length@listOfParamedTests,Length@listOfParamedTests,1,{}]];
+
+RosenbrockFunction[c1_,c2_]:=SetVars[((c1-x)^2+c2*(y-x^2)^2),{x,y}];
+
+
+HW3p1SymFn=SetVars[(100*x2-x1)^2+(1-x1)^2,{x1,x2}];
+HW3p1x0={2,5};
+
+HW2p1aSymFn=SetVars[5x1^2-9x1*x2+4.075x2^2+x1,{x1,x2}];
+HW2p1x0={1,1};
+HW2p1Tol=N[10^(-1)];
+
+HW4p1SymFn=SetVars[x1^4 + (x1+x2)^2 + (E^x2 -1)^2,{x1,x2}];
+HW4p1x0a={1,1};
+HW4p1x0b={-1,3};
+
+HW2p2aSymFn=SetVars[((x1+5)^2+(x2+8)^2+(x3+7)^2+2x1^2*x2^2+4x1^2 x3^2),{x1,x2,x3}];
+HW2p2x0={1,1,1};
+
+
+testTol=N@.0001;
+
+paramedHWTests={
+ParameterizedTest[HW2p1aSymFn,HW2p1x0,HW2p1Tol],
+ParameterizedTest[HW2p2aSymFn,HW2p2x0,HW2p1Tol],
+
+ParameterizedTest[HW3p1SymFn,HW3p1x0,testTol],
+
+ParameterizedTest[HW4p1SymFn,HW4p1x0b,testTol],
+ParameterizedTest[HW4p1SymFn,HW4p1x0a,testTol]
+};
+
+paramedrosenbrockFunctionTests={
+ParameterizedTest[RosenbrockFunction[1,100],1*{-1.5,-1.25},.1],
+ParameterizedTest[RosenbrockFunction[1,100],1*{-1.5,-1.25},testTol],
+ParameterizedTest[RosenbrockFunction[1,100],100*{-1.5,-1.25},testTol],
+ParameterizedTest[RosenbrockFunction[1,100],10000*{-1.5,-1.25},testTol]
+};
+
+
+hwTests={
+HW2Prob1aTest=DoParameterizedTest[HW2p1aSymFn,HW2p1x0,HW2p1Tol],
+HW2Prob2aTest=DoParameterizedTest[HW2p2aSymFn,HW2p2x0,HW2p1Tol],
+
+HW3Prob1Test=DoParameterizedTest[HW3p1SymFn,HW3p1x0,testTol],
+
+HW4Prob2bTest=DoParameterizedTest[HW4p1SymFn,HW4p1x0b,testTol],
+HW4Prob2aTest=DoParameterizedTest[HW4p1SymFn,HW4p1x0a,testTol]
+};
+
+rosenbrockFunctionTests={
+easyTest=DoParameterizedTest[RosenbrockFunction[1,100],1*{-1.5,-1.25},.1],
+mediumTest=DoParameterizedTest[RosenbrockFunction[1,100],1*{-1.5,-1.25},testTol],
+mediumHardTest=DoParameterizedTest[RosenbrockFunction[1,100],100*{-1.5,-1.25},testTol],
+hardTest=DoParameterizedTest[RosenbrockFunction[1,100],10000*{-1.5,-1.25},testTol]
+};
+
+Quasi-Newton:
+CompareBFGSQuasiNewtonMethods[paramedTest_]:=CompareMethods[paramedTest,
+{BFGSQuasiNewtonWithELS,BFGSQuasiNewtonWithFDsAndELS,BFGSQuasiNewtonWithFDsAndBT}];
+CompareBFGSQuasiNewtonMethods[{DoParameterizedTest[SetVars[N[(x1*x2)^2*E^(-(x1*x2)^2)],{x1,x2}],RandomReal[{-1,1},2],.01]}]
+CompareBFGSQuasiNewtonMethods[{DoParameterizedTest[HW2p2aSymFn,HW2p2x0,testTol]}]
+with ELS:
+mediumTest@BFGSQuasiNewtonWithELS
+mediumEasyTest@BFGSQuasiNewtonWithELS
+with FDs and ELS:
+mediumTest@BFGSQuasiNewtonWithFDsAndELS
+mediumEasyTest@BFGSQuasiNewtonWithFDsAndELS
+with FDs and BT:
+mediumTest@BFGSQuasiNewtonWithFDsAndBT
+mediumEasyTest@BFGSQuasiNewtonWithFDsAndBT
+Newton:
+(*DoParameterizedTest[RosenbrockFunction[1,100],{-.5,-1.25},.1]@GradientWithELS*)
+DoParameterizedTest[RosenbrockFunction[1,100],10000*{-1.5,-1.25},.000000001]@NewtonWithBT
+DoParameterizedTest[RosenbrockFunction[1,100],100*{-1.5,-1.25},.000000001]@NewtonWithELS
+(Plot3D[#,{(x),-2,2},{(y),-1,3},PlotTheme->"Classic",MeshFunctions->{#3&}]&)@RosenbrockFunction[1,100]
+with ELS:
+HW3Prob1Test@NewtonWithELS
+with BT:
+HW3Prob1Test@NewtonWithBT
+Gradient:
+with ELS:
+HW3Prob1Test@GradientWithELS
+with FDs and ELS:
+HW3Prob1Test@GradientWithFDsAndELS
+with BT:
+HW3Prob1Test@GradientWithBT
+with FDs and BT:
+HW3Prob1Test@GradientWithFDsAndBT
+HW3Prob1Test@GradientWithFDsAndBT
+All:
+CompareBFGSQuasiNewtonMethods[{DoParameterizedTest[HW2p2aSymFn,N@100*{1,1,1},testTol]}]
+CompareMethods[{DoParameterizedTest[HW4p1SymFn,HW4p1x0b,.01]},{GradientWithBT,BFGSQuasiNewtonWithFDsAndBT}]
+Visualization Tools
+Convergence plots:
+Yasss! Pretty results. So #gorg
+(* Pass me the results of a descent method - I'll make 'em totes fab. *)
+PrettyResults[testResults_,numSigFigs_,iteratesColor_,initialPointColor_,actualSolnColor_,foundSolnColor_]:=Module[{
+objectiveFunctionSymFn=testResults["objectiveFunctionSymFn"],
+vars=testResults["vars"],
+methodName=testResults["nickName"],
+initialPoint=testResults["x0"],
+actualSoln=testResults["actualSoln"],
+foundSoln=testResults["foundSoln"],
+distanceBetweenFoundAndActualSolns=testResults["distanceFromActual"],
+differenceBetweenFoundAndActualVals=testResults["differenceFromActual"],
+numIters=testResults["iterations"],
+tolerance=testResults["parameters"]["tolerance"],
+totalRunningTime=testResults["totalRunningTime"],
+stepDirectionCalculationTime=testResults["stepDirectionCalculationTime"],
+stepLengthCalculationTime=testResults["stepLengthCalculationTime"],
+
+convergenceData=ConvergenceAnalysisOfDescentMethod@testResults,
+gradientAtSoln,gradientMagnitudeAtSoln,
+hessianAtSoln,determinantOfHessianAtSoln,
+eigenvaluesOfHessianAtSoln,conditionNumberOfHessianAtSoln,
+
+totalCalculationTime,
+percentageOfCalcTimeFn,
+
+sj=StringJoin,
+ts=ToString@*TraditionalForm,
+foundSolnStr,actualSolnStr,initialPointStr,
+tableTitle,table,bb,cb,nf
+},(
+gradientAtSoln=convergenceData["Gradient"];
+gradientMagnitudeAtSoln=convergenceData["GradientMagnitude"];
+hessianAtSoln=convergenceData["Hessian"];
+determinantOfHessianAtSoln=convergenceData["HessianDeterminant"];
+eigenvaluesOfHessianAtSoln=convergenceData["Eigenvalues"];
+conditionNumberOfHessianAtSoln=convergenceData["ConditionNumber"];
+totalCalculationTime=stepDirectionCalculationTime+stepLengthCalculationTime;
+
+nf=ts@NumberForm[#,numSigFigs]&;
+cb[c_]:=ts@Style[#,Darker@c,Bold]&;
+bb=cb@Black;
+tableTitle=sj[bb@methodName,"\n",ts/@{"f(",bb@"x",") = ",ts@objectiveFunctionSymFn}];
+percentageOfCalcTimeFn=If[totalCalculationTime==0,ts@"NA"&,(nf[100*(#/totalCalculationTime)]<>ts@"%")&];
+
+actualSolnStr=cb[actualSolnColor]@"Subsuperscript[x, M, *]";
+foundSolnStr=cb[foundSolnColor]@"x^*";
+initialPointStr=cb[initialPointColor]@"Subscript[x, 0]";
+
+table={
+{"",bb@"Descent Method Data",""},
+{bb@"Tolerance:",ts@tolerance,""},
+{sj[{cb[iteratesColor]@"Iterations",bb@":"}],ts@numIters,""},
+{sj[{cb[initialPointColor]@"Initial Point Subscript[x, 0]",bb@":"}],nf@initialPoint[[;;-2]],sj[{"f(",initialPointStr,") = "}]<>nf@initialPoint[[-1]]},
+{sj[{cb[foundSolnColor]@"Found Soln x^*",bb@":"}],nf@foundSoln[[;;-2]],sj[{"f(",foundSolnStr,") = "}]<>nf@foundSoln[[-1]]},
+{sj[{cb[actualSolnColor]@"Mathematica's Soln Subsuperscript[x, M, *]",bb@":"}],nf@actualSoln[[;;-2]],sj[{"f(",actualSolnStr,") = "}]<>nf@actualSoln[[-1]]},
+{"","",""},
+{"",bb@"Convergence Analysis Data",""},
+{sj[{"\[LeftDoubleBracketingBar]",foundSolnStr,"-",actualSolnStr,"\[RightDoubleBracketingBar]:"}],nf@distanceBetweenFoundAndActualSolns,""},
+{sj[{"\[LeftBracketingBar]","f(",foundSolnStr,")-f("<>actualSolnStr,")\[RightBracketingBar]",bb@":"}],nf@differenceBetweenFoundAndActualVals,""},
+{ts[" \[Gradient]f("<>foundSolnStr<>"):"],nf@gradientAtSoln,""},
+{ts["\[LeftDoubleBracketingBar]\[Gradient]f("<>foundSolnStr<>")\[RightDoubleBracketingBar]:"],nf@gradientMagnitudeAtSoln,""},
+{ts[" Subscript[H, f]("<>foundSolnStr<>"):"],nf@hessianAtSoln,""},
+{ts["\[LeftBracketingBar]Subscript[H, f]("<>foundSolnStr<>")\[RightBracketingBar]:"],nf@determinantOfHessianAtSoln,""},
+{ts@StringForm[" Subscript[\[Lambda], Subscript[H, f](``)]:",foundSolnStr],nf@eigenvaluesOfHessianAtSoln,""},
+{ts[" \[Kappa](Subscript[H, f]("<>foundSolnStr<>")):"],nf@conditionNumberOfHessianAtSoln,""},
+{"","",""},
+(*{bb@"Total Run Time (secs):",nf@totalRunningTime,""},*)
+{"",bb@"Calculation Times (secs)",""},
+{bb@"Total:",nf@totalCalculationTime,percentageOfCalcTimeFn@totalCalculationTime},
+{bb@"Step-Direction:",nf@stepDirectionCalculationTime,percentageOfCalcTimeFn@stepDirectionCalculationTime},
+{bb@"Step-Length:",nf@stepLengthCalculationTime,percentageOfCalcTimeFn@stepLengthCalculationTime}
+};
+
+Return@TableForm[table
+(*,TableDepth\[Rule]2,TableAlignments\[Rule]{Left,Center}*)
+,TableHeadings->{None,{"",tableTitle,""}}];
+)];
+PrettyResults[testResults_,numSigFigs_]:=PrettyResults[testResults,numSigFigs,Blue,Green,Magenta,Red];
+PrettyResults[testResults_]:=PrettyResults[testResults,6];
+MultiPrettyResults[multipleTestResults__]:=ParallelMap[PrettyResults,{multipleTestResults}];
+Plotting descent methods, for objective functions tested against objective functions of 2 variables.
+(* Pass me the results from a descent method! As long as the objective function was of 2 variables. *)
+PlotResults2D[testResults_,numSigFigs_,iteratesColor_,initialPointColor_,actualSolnColor_,foundSolnColor_]:=Module[{
+objectiveFunctionSymFn=testResults["objectiveFunctionSymFn"],
+vars=testResults["vars"],
+methodName,initialPoint,tolerance,
+actualSoln,foundSoln,iterates,numIters,
+(*gradients,steps,*)
+distanceBetweenFoundAndActualSolns,
+
+objFnPlot,listPlotFn,
+iteratesPlot,initialPointPlot,
+foundSolnPlot,actualSolnPlot,allPlots,
+(*gradientsPlot,stepsPlot,*)
+
+plotLegend,xyPlotViewCenter,
+xRange,yRange,xyRadius,xyOffsets,
+zRange,zRadius,zOffset,
+
+plotPointDiameter=.03,
+plotLabel,sj,ts,bb,cb
+},(
+If[Length@vars!=2,(
+(*Throw["Objective function must be of two variables! These are the variables given: "<>ToString[TraditionalForm/@vars]];*)
+PrintTemporary[StringForm["The objective function (``) is not of two variables (``), so cannot be plotted.",
+TraditionalForm@objectiveFunctionSymFn,TraditionalForm@vars]];
+Return[PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor]];
+)];
+
+sj=StringJoin;
+ts=ToString@*TraditionalForm;
+cb[c_]:=ts@Style[#,Darker@c,Bold]&;
+bb=cb@Black;
+
+tolerance=testResults["parameters"]["tolerance"];
+methodName=testResults["nickName"];
+initialPoint=testResults["x0"];
+actualSoln=testResults["actualSoln"];
+foundSoln=testResults["foundSoln"];
+(*gradients=testResults["gradients"];
+steps=testResults["steps"];*)
+distanceBetweenFoundAndActualSolns=testResults["distanceFromActual"];
+numIters=testResults["iterations"];
+iterates=If[numIters<=2,{initialPoint,foundSoln},testResults["iterates"][[2;;-2]]];
+
+xyPlotViewCenter=Barycenter[foundSoln,actualSoln];
+xyRadius=Max[EuclideanMetric[xyPlotViewCenter[[;;2]],#]&/@{foundSoln[[;;2]],initialPoint[[;;2]]}];
+xyOffsets=If[xyRadius!=0,1.05*{-xyRadius,xyRadius},{-1,1}+xyPlotViewCenter[[;;2]]];
+xRange=xyOffsets+{xyPlotViewCenter[[1]],xyPlotViewCenter[[1]]};
+yRange=xyOffsets+{xyPlotViewCenter[[2]],xyPlotViewCenter[[2]]};
+
+zRange=WidestRangeForDim[foundSoln,actualSoln,initialPoint,3];
+zRadius=Norm[zRange]/2;
+zOffset=0.3*{-zRadius,zRadius};
+zRange+=zOffset;
+
+listPlotFn[points_,color_,opacity_,pointDiameter_]:=ListPointPlot3D[
+ParallelMap[(#+{0,0,pointDiameter})&,points],
+PlotStyle->Directive[color,Opacity[opacity],PointSize[pointDiameter]]];
+listPlotFn[points_,color_,opacity_]:=listPlotFn[points,color,opacity,plotPointDiameter];
+
+iteratesPlot=listPlotFn[iterates,iteratesColor,0.7];
+initialPointPlot=listPlotFn[{initialPoint},initialPointColor,1,plotPointDiameter*1.05];
+actualSolnPlot=listPlotFn[{actualSoln},actualSolnColor,0.7];
+foundSolnPlot=listPlotFn[{foundSoln},foundSolnColor,1,plotPointDiameter*1.05];
+
+plotLegend=PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor];
+
+objFnPlot=Plot3D[(objectiveFunctionSymFn/.(Thread[vars->{x,y}])),{x,xRange[[1]],xRange[[2]]},{y,yRange[[1]],yRange[[2]]},
+PlotRange->zRange,
+PlotLegends->Placed[plotLegend,Below],
+ClippingStyle->Opacity[0.5],
+PlotStyle->Directive[Opacity[.7],Specularity[White,50]],
+ColorFunction->"DarkRainbow",
+PlotTheme->"Detailed",
+ImageSize->Full,
+ MeshFunctions->{#3&}];
+
+allPlots={
+objFnPlot,
+(*gradientsPlot,
+stepsPlot,*)
+iteratesPlot,
+(*listPlotFn[{zCenter},Black,1,plotPointDiameter*0.5],
+listPlotFn[{centerOfPlotView},Red,1,plotPointDiameter*0.5],*)
+initialPointPlot,
+actualSolnPlot,
+foundSolnPlot
+};
+
+plotLabel=sj[bb@methodName,"\n",ts/@{"f(",bb@"x",") = ",ts@objectiveFunctionSymFn}];
+Show[allPlots,
+PlotLabel->(*Style[methodName,Black,Bold],*)plotLabel,
+AxesLabel->(Style[#,Bold]&/@Append[ToString/@vars,StringForm["f(``,``)",First@vars,Last@vars]]),
+ImageSize->Large
+]
+)];
+PlotResults2D[testResults_,numSigFigs_]:=PlotResults2D[testResults,numSigFigs,Blue,Green,Magenta,Red];
+PlotResults2D[testResults_]:=PlotResults2D[testResults,6];
+Plot multiple tests in grids! For descent methods tested against objective functions of 2 variables.
+(* Pass us an array of results from descent methods! We'll make a plot for each - as long as the objective function/s was/were of 2 variables. *)
+GeneratePlotsArray[listOfMultipleTestResults_]:=ParallelMap[PlotResults2D,listOfMultipleTestResults];
+(*GeneratePlotsGrid[listOfMultipleTestResults_]:=GraphicsGrid[Partition[GeneratePlotsArray[listOfMultipleTestResults],2,2,1,{}],Frame\[Rule]All,ImageSize\[Rule]Full];*)
+GeneratePlotsTable[listOfMultipleTestResults_]:=TableForm[Partition[GeneratePlotsArray[listOfMultipleTestResults],2,2,1,{}]];
+GeneratePlotsTable2[listOfMultipleTestResults_]:=TableForm[Partition[GeneratePlotsArray[listOfMultipleTestResults],1,1,1,{}]];
+(TODO: UPDATE OR REMOVE THIS) Compare different descent methods against the same inputs!
+(* If objectiveFunctionSymFn is of 2 variables, you can pass the results of this to either GeneratePlotsArray, GeneratePlotsGrid, GeneratePlotsTable, or GeneratePlotsTable2.
+If objectiveFunctionSymFn is of more than 2 variables, can pass the results to MultiPrettyResults. *)
+RunTests[objectiveFunctionSymFn_,x0_,tolerance_,s_,beta_,gamma_]:=Module[{allTests},(
+allTests={
+GradientWithELS[objectiveFunctionSymFn,x0,tolerance],
+GradientWithFDsAndELS[objectiveFunctionSymFn,x0,tolerance],
+GradientWithFDsAndBT[objectiveFunctionSymFn,x0,tolerance,s,beta,gamma],
+
+NewtonWithELS[objectiveFunctionSymFn,x0,tolerance],
+NewtonWithBT[objectiveFunctionSymFn,x0,tolerance,s,beta,gamma]
+};
+Return@allTests;
+)];
+RunTests[objectiveFunctionSymFn_,x0_,tolerance_]:=RunTests[objectiveFunctionSymFn,x0,tolerance,$DefaultBTParamS,$DefaultBTParamBeta,$DefaultBTParamGamma];
+
+Dynamic plots:
+DynamicPlotter[testResults_,numSigFigs_,iteratesColor_,initialPointColor_,actualSolnColor_,foundSolnColor_]:=DynamicModule[{
+
+objectiveFunctionSymFn=testResults["objectiveFunctionSymFn"],
+vars=testResults["vars"],
+methodName,initialPoint,tolerance,
+actualSoln,foundSoln,iterates,numIters,
+(*gradients,steps,*)
+distanceBetweenFoundAndActualSolns,
+
+objFnPlot,listPlotFn,
+iteratesPlot,initialPointPlot,
+foundSolnPlot,actualSolnPlot,allPlots,
+(*gradientsPlot,stepsPlot,*)
+
+plotLegend,xyPlotViewCenter,
+xRange,yRange,xyRadius,xyOffsets,
+zRange,zRadius,zOffset,
+
+plotPointDiameter=.03,
+plotLabel,sj,ts,bb,cb
+},(
+If[Length@vars!=2,(
+(*Throw["Objective function must be of two variables! These are the variables given: "<>ToString[TraditionalForm/@vars]];*)
+PrintTemporary[StringForm["The objective function (``) is not of two variables (``), so cannot be plotted.",
+TraditionalForm@objectiveFunctionSymFn,TraditionalForm@vars]];
+Return[PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor]];
+)];
+
+sj=StringJoin;
+ts=ToString@*TraditionalForm;
+cb[c_]:=ts@Style[#,Darker@c,Bold]&;
+bb=cb@Black;
+
+tolerance=testResults["parameters"]["tolerance"];
+methodName=testResults["nickName"];
+initialPoint=testResults["x0"];
+actualSoln=testResults["actualSoln"];
+foundSoln=testResults["foundSoln"];
+(*gradients=testResults["gradients"];
+steps=testResults["steps"];*)
+distanceBetweenFoundAndActualSolns=testResults["distanceFromActual"];
+numIters=testResults["iterations"];
+iterates=If[numIters<=2,{initialPoint,foundSoln},testResults["iterates"][[2;;-2]]];
+
+xyPlotViewCenter=Barycenter[foundSoln,actualSoln];
+xyRadius=Max[EuclideanMetric[xyPlotViewCenter[[;;2]],#]&/@{foundSoln[[;;2]],initialPoint[[;;2]]}];
+xyOffsets=If[xyRadius!=0,1.05*{-xyRadius,xyRadius},{-1,1}+xyPlotViewCenter[[;;2]]];
+xRange=xyOffsets+{xyPlotViewCenter[[1]],xyPlotViewCenter[[1]]};
+yRange=xyOffsets+{xyPlotViewCenter[[2]],xyPlotViewCenter[[2]]};
+
+zRange=WidestRangeForDim[foundSoln,actualSoln,initialPoint,3];
+zRadius=Norm[zRange]/2;
+zOffset=0.3*{-zRadius,zRadius};
+zRange+=zOffset;
+
+listPlotFn[points_,color_,opacity_,pointDiameter_]:=ListPointPlot3D[
+ParallelMap[(#+{0,0,pointDiameter})&,points],
+PlotStyle->Directive[color,Opacity[opacity],PointSize[pointDiameter]]];
+listPlotFn[points_,color_,opacity_]:=listPlotFn[points,color,opacity,plotPointDiameter];
+
+iteratesPlot=listPlotFn[iterates,iteratesColor,0.7];
+initialPointPlot=listPlotFn[{initialPoint},initialPointColor,1,plotPointDiameter*1.05];
+actualSolnPlot=listPlotFn[{actualSoln},actualSolnColor,0.7];
+foundSolnPlot=listPlotFn[{foundSoln},foundSolnColor,1,plotPointDiameter*1.05];
+
+plotLegend=PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor];
+
+objFnPlot=Plot3D[(objectiveFunctionSymFn/.(Thread[vars->{x,y}])),{x,xRange[[1]],xRange[[2]]},{y,yRange[[1]],yRange[[2]]},
+PlotRange->zRange,
+PlotLegends->Placed[plotLegend,Below],
+ClippingStyle->Opacity[0.5],
+PlotStyle->Directive[Opacity[.7],Specularity[White,50]],
+ColorFunction->"DarkRainbow",
+PlotTheme->"Detailed",
+ImageSize->Full,
+ MeshFunctions->{#3&}];
+
+allPlots={
+objFnPlot,
+(*gradientsPlot,
+stepsPlot,*)
+iteratesPlot,
+(*listPlotFn[{zCenter},Black,1,plotPointDiameter*0.5],
+listPlotFn[{centerOfPlotView},Red,1,plotPointDiameter*0.5],*)
+initialPointPlot,
+actualSolnPlot,
+foundSolnPlot
+};
+
+plotLabel=sj[bb@methodName,"\n",ts/@{"f(",bb@"x",") = ",ts@objectiveFunctionSymFn}];
+Show[allPlots,
+PlotLabel->(*Style[methodName,Black,Bold],*)plotLabel,
+AxesLabel->(Style[#,Bold]&/@Append[ToString/@vars,StringForm["f(``,``)",First@vars,Last@vars]]),
+ImageSize->Large
+]
+
+Dynamic[(
+TableForm[{
+{Show[graphWithHighlightedSubgraphs,ImageSize->Large],ShowGraphFn@#}
+}]&@Clock[{1,lengthOfTour,1},rate]
+)]
+
+)];
+Matrix sequences:
+Zeros[dims_]:=ConstantArray[0,dims];
+
+DynamicMatrixPlotImage[sequenceOfMatrices_,rate_,showFrame_]:=DynamicModule[{
+matrixPlots,img1,
+lengthOfSeq=Length@sequenceOfMatrices,
+big=Show[#,ImageSize->Large]&
+},(
+matrixPlots=Map[MatrixPlot[#,Frame->showFrame]&,sequenceOfMatrices];
+img1=ImageAssemble[Partition[matrixPlots,Floor[Sqrt[lengthOfSeq]]]];
+
+Dynamic[(
+TableForm[{
+{TableForm[{{big@First@matrixPlots,big@Last@matrixPlots}},TableHeadings->{None, {"Subscript[B, 0]","B at x^*"}}]},
+{TableForm[{{big@matrixPlots[[#]],big@img1}},TableHeadings->{ {"Subscript[B, 0], ..., B at x^*"},None}]}
+}]&@Clock[{1,lengthOfSeq,1},rate]
+)]
+)];
+DynamicMatrixPlotImage[seq_,rate_]:=DynamicMatrixPlotImage[seq,rate,False];
+DynamicMatrixPlotImage[seq_]:=DynamicMatrixPlotImage[seq,2];
+
+(*testSeq=RandomReal[1,{10,5,5}];
+diff=(FactorInteger[If[PrimeQ@#,#+1,#]][[;;]]&)@11;
+diff=(Ceiling[Sqrt[#+.5]]^2-#)&@11;*)
+
+(*testSeq=RandomReal[1,{10,5,5}];*)
+(*testSeq=(Array[(#1+#2&),{5,5}]*#)&/@Range[7]*)
+(*testSeq//Length*)
+(*DynamicMatrixPlotImage[testSeq,2,False]*)
+Quasi-Newton specific:
+WatchApproximatedHessian[quasiNewtonResults_,rate_,showFrame_]:=DynamicMatrixPlotImage[quasiNewtonResults["approximatedHessians"],rate,showFrame];
+WatchApproximatedHessian[res_,rate_]:=WatchApproximatedHessian[res,rate,False];
+WatchApproximatedHessian[res_]:=WatchApproximatedHessian[res,2];
+
+Comparisons
+Plotting the results of multiple methods, together:
+(* Pass me the results of multiple descent methods! As long as the objective function was of 2 variables. *)
+ComparisonPlot[results_,colors_ ,numSigFigs_(*,initialPointColor_,actualSolnColor_,*)]:=Module[{
+objectiveFunctionSymFn,
+vars,
+methodNames,initialPoints,tolerances,
+actualSolns,foundSolns,iteratesOfEach,numItersOfEach,
+distanceBetweenFoundAndActualSolnsOfEach,
+
+foundSolnsBaryCenter,
+actualSolnsBaryCenter,
+initialPointsBaryCenter,
+
+objFnPlot,listPlotFn,
+iteratesOfEachPlot,initialPointsPlot,
+foundSolnsPlot,actualSolnsPlot,allPlots,
+(*gradientsPlot,stepsPlot,*)
+
+(*plotLegend,*)
+xyPlotViewCenter,
+xRange,yRange,xyRadius,xyOffsets,
+zRange,zRadius,zOffset,
+
+plotPointDiameter=.03,
+(*plotLabel,sj,ts,bb,cb,*)
+(*primeModelResults,*)
+collectTestInfoFn,
+collectTestParamInfoFn
+},(
+objectiveFunctionSymFn=((results[[1]])["objectiveFunctionSymFn"]);
+Print@objectiveFunctionSymFn;
+
+vars=GetVars@objectiveFunctionSymFn;
+If[Length@vars!=2,(
+Throw[StringForm["The objective function (``) is not of two variables (``), so cannot be plotted.",
+TraditionalForm@objectiveFunctionSymFn,TraditionalForm@vars]];
+(*PrintTemporary[StringForm["The objective function (``) is not of two variables (``), so cannot be plotted.",
+TraditionalForm@objectiveFunctionSymFn,TraditionalForm@vars]];
+Return[PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor]];*)
+)];
+
+collectTestInfoFn[key_]:=Table[r[Key[key]],{r,results}];
+collectTestParamInfoFn[key_]:=Table[r["parameters"][Key[key]],{r,results}];
+
+tolerances=collectTestParamInfoFn["tolerance"];
+methodNames=collectTestInfoFn["nickName"];
+initialPoints=collectTestInfoFn["x0"];
+actualSolns=collectTestInfoFn["actualSoln"];
+foundSolns=collectTestInfoFn["foundSoln"];
+distanceBetweenFoundAndActualSolnsOfEach=collectTestInfoFn["distanceFromActual"];
+numItersOfEach=collectTestInfoFn["iterations"];
+iteratesOfEach=ParallelTable[If[r["iterations"]<=2,{r["x0"],r["foundSoln"]},r["iterates"][[2;;-2]]],{r,results}];
+(*Print@iteratesOfEach;*)
+
+(*sj=StringJoin;
+ts=ToString@*TraditionalForm;
+cb[c_]:=ts@Style[#,Darker@c,Bold]&;
+bb=cb@Black;*)
+
+
+foundSolnsBaryCenter=BarycenterFromList[foundSolns];
+actualSolnsBaryCenter=BarycenterFromList[actualSolns];
+initialPointsBaryCenter=BarycenterFromList[initialPoints];
+(*Print@initialPointsBaryCenter;*)
+
+
+xyPlotViewCenter=Barycenter[foundSolnsBaryCenter,actualSolnsBaryCenter];
+(*Print@xyPlotViewCenter;*)
+xyRadius=Max[EuclideanMetric[xyPlotViewCenter[[;;2]],#]&/@{foundSolnsBaryCenter[[;;2]],initialPointsBaryCenter[[;;2]]}];
+(*Print@xyRadius;*)
+xyOffsets=If[xyRadius!=0,1.05*{-xyRadius,xyRadius},{-1,1}+xyPlotViewCenter[[;;2]]];
+xRange=xyOffsets+{xyPlotViewCenter[[1]],xyPlotViewCenter[[1]]};
+yRange=xyOffsets+{xyPlotViewCenter[[2]],xyPlotViewCenter[[2]]};
+
+zRange=WidestRangeForDim[foundSolnsBaryCenter,actualSolnsBaryCenter,initialPointsBaryCenter,3];
+zRadius=Norm[zRange]/2;
+zOffset=0.3*{-zRadius,zRadius};
+zRange+=zOffset;
+
+listPlotFn[listsOfPoints_,opacity_,pointDiameter_]:=ListPointPlot3D[
+listsOfPoints
+(*,PlotStyle\[Rule]colors*)
+(*ParallelMap[(#+{0,0,pointDiameter})&,points],*)
+,PlotStyle->Table[Directive[colors[[i]],Opacity[opacity],(PointSize[pointDiameter*(1-.1*i)^2])],{i,Range@Length@colors}]
+];
+listPlotFn[points_,opacity_]:=listPlotFn[points,opacity,plotPointDiameter];
+
+iteratesOfEachPlot=listPlotFn[iteratesOfEach,0.7];
+initialPointsPlot=listPlotFn[{#}&/@initialPoints,1,plotPointDiameter*1.05];
+actualSolnsPlot=listPlotFn[{#}&/@actualSolns,1];
+foundSolnsPlot=listPlotFn[{#}&/@foundSolns,1,plotPointDiameter*1.05];
+
+(*plotLegend=PrettyResults[testResults,numSigFigs,iteratesColor,initialPointColor,actualSolnColor,foundSolnColor];*)
+
+(*Print[xRange,yRange,zRange];*)
+
+objFnPlot=Plot3D[(objectiveFunctionSymFn/.(Thread[vars->{x,y}])),{x,xRange[[1]],xRange[[2]]},{y,yRange[[1]],yRange[[2]]},
+PlotRange->zRange,
+(*PlotLegends\[Rule]Placed[plotLegend,Below],*)
+ClippingStyle->Opacity[0.5],
+PlotStyle->Directive[Opacity[.7],Specularity[White,50]],
+ColorFunction->"DarkRainbow",
+PlotTheme->"Detailed",
+ImageSize->Full,
+ MeshFunctions->{#3&}];
+
+allPlots={
+objFnPlot,
+iteratesOfEachPlot,
+initialPointsPlot,
+actualSolnsPlot,
+foundSolnsPlot
+};
+
+
+(*plotLabel=sj[bb@methodName,"\n",ts/@{"f(",bb@"x",") = ",ts@objectiveFunctionSymFn}];*)
+Show[allPlots,
+PlotLabel->TableForm@Table[Style[TraditionalForm[methodNames[[i]]],Bold,colors[[i]]],{i,Range@Length@colors}],
+(*AxesLabel\[Rule](Style[#,Bold]&/@Append[ToString/@vars,StringForm["f(``,``)",First@vars,Last@vars]]),*)
+ImageSize->Large
+]
+)];
+ComparisonPlot[results_,colors_]:=ComparisonPlot[results,colors,6];
+ComparisonPlot[results_]:=ComparisonPlot[results,RandomColor@Length@results];
+
+(*ComparisonPlot[#[HW2p1aSymFn,HW2p1x0,.00001]&/@{NewtonWithBT,BFGSQuasiNewtonWithELS}]*)
+(*{ComparisonPlot[ParameterizedTest[SetVars[HW3p1SymFn,{x1,x2}],HW3p1x0,.01]/@{NewtonWithBT[#1,#2,#3,.1,.5,.5]&,BFGSQuasiNewtonWithFDsAndBT},{Blue,Red}],
+ComparisonPlot[ParameterizedTest[SetVars[HW3p1SymFn,{x1,x2}],HW3p1x0,.01]/@{NewtonWithBT[#1,#2,#3,.1,.5,.5]&,BFGSQuasiNewtonWithFDsAndBT},{Red,Blue}]}*)
+
+methodsToCompare={
+OLDBFGSQuasiNewtonWithFDsAndBT[#1,#2,#3,1,.5,.5]&
+,NewtonWithBT[#1,#2,#3,1,.5,.5]&
+};
+
+(*results={
+NewtonWithBT[SetVars[HW3p1SymFn,{x1,x2}],{1,1},.001,.1,.5,.5],
+NewtonWithBT[SetVars[HW3p1SymFn,{x1,x2}],-{1,1},.001,.1,.5,.5],
+NewtonWithBT[SetVars[HW3p1SymFn,{x1,x2}],{1,-1},.001,.1,.5,.5],
+NewtonWithBT[SetVars[HW3p1SymFn,{x1,x2}],{-1,1},.001,.1,.5,.5]
+(*,OLDBFGSQuasiNewtonWithFDsAndBT[#1,#2,#3,1,.5,.5]&*)
+};*)
+results=ParameterizedTest[SetVars[HW3p1SymFn,{x1,x2}],HW3p1x0,.001]/@methodsToCompare;
+
+PlotResults2D/@results
+ComparisonPlot[results(*,{Red,Blue}*)]
+
+(*WatchApproximatedHessian[ParameterizedTest[SetVars[HW3p1SymFn,{x1,x2}],HW3p1x0,.01]@(BFGSQuasiNewtonWithFDsAndBT[#1,#2,#3,.05,.5,.5]&)]*)
+ExamineResults@Last@results;

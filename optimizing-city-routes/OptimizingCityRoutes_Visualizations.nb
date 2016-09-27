@@ -1,0 +1,527 @@
+(*Author: Storm Meadows*)
+(*Optimizing City Routes - Graphics/Visualizations*)
+(*
+Note:
+In this file, a '$' prefix denotes a constant, ie a variable whose value doesn't (or "shouldn't") change once assigned.
+(Checked that names didn't clash with any pre-existing variables.)
+*)
+UtilitiesModule[]:=Module[{},(
+
+NullQ[x_]:=TrueQ[x==Null];
+SymbolQ[x_]:=TrueQ[Head[x]==Symbol];
+NonListSymbolQ[x_]:=TrueQ[Not[NullQ[x]] && Not[ListQ[x]] && SymbolQ[x]];
+
+Peek[expr_]:=(Print[expr];expr);
+
+FnPeek[fn_,outputTransform_]:=Module[{out,args,fnPeekTable},(
+out=fn[##];
+args=StringTake[ToString[HoldForm[##]],{10,-2}];
+
+fnPeekTable:=Module[{
+rowHeading={"In ","Out"},
+colHeading={ToString[fn]},
+data={args,out}
+},(
+If[Not[NullQ[outputTransform]],(
+AppendTo[rowHeading,StringForm["//``",outputTransform]];
+AppendTo[data,outputTransform[out]]
+)];
+
+TableForm[Transpose@{HoldForm/@data}
+,TableHeadings->{rowHeading,colHeading}
+,TableDepth->2,
+,TableSpacing->{3,1}
+,TableAlignments->{Left, Top}]
+)];
+
+Print[fnPeekTable];
+
+out
+)]&;
+FnPeek[fn_]:=FnPeek[fn,Null];
+
+(*Super useful for debugging.*)
+Utilities$ProgramStateModule[]:=Module[{},(
+If[SymbolQ[$ProgramVariables],$ProgramVariables={SymbolName[$ProgramVariables]}];
+
+ProgramState[]:=Module[{},(
+(*If[TrueQ["Null"=!=ToString[Definition[#]]],Print[Definition[#]]]*)
+If[Not[NullQ[#]],Print[Definition[#]]]&/@
+$ProgramVariables;
+$ProgramVariables
+)];
+
+$NewSymbol=If[#2=="Global`",AppendTo[$ProgramVariables,#1]]&;
+)];
+Utilities$ProgramStateModule[];
+
+)];
+(*InitSymbol[s_,default_]:=If[SameQ[Symbol,Head[s]]&&!MemberQ[{False,True,Null},s],(Set[s,default])];
+LoadModule[m_]:=(m[];Print[SymbolName[m], " loaded."];m);
+LoadModules[modules__]:=LoadModule/@{modules};*)
+
+Init[]:=Module[{
+LoadModule,LoadModules,
+InitSymbol,InitSymbols
+},(
+LoadModule[m_]:=(m[];Print[SymbolName[m], " loaded."];m);
+LoadModules[modules__]:=LoadModule/@{modules};
+
+LoadModules[
+ProgramStateModule,
+UtilitiesModule,
+
+ConstantsAndRequiredVariablesModule,
+
+ImageProcessingModule,
+
+PrintingModule,
+GraphicsModule,
+
+GraphsModule,
+StreetToGraphConversionModule
+];
+
+InitSymbol[s_,default_]:=If[SameQ[Symbol,Head[s]]&&!MemberQ[{False,True,Null},s],(Set[s,default])];
+InitSymbols:=InitSymbol[#[[1]],#[[2]]]&/@(ReleaseHold[$DEFAULTS]);
+
+Print@"Program initialized.";
+(*ProgramState[]*)
+)];
+
+
+(*The variables in this module are initialized in Init[].*)
+ConstantsAndRequiredVariablesModule[]:=Module[{},(
+
+$CONSTANTS={
+(*Booleans*)
+$PrintGraphsQ,
+$SaveGraphicsQ,
+$VerboseQ,
+$StateSuppressedQ,
+$DebugAllQ,
+
+(*This project's folder path*)
+$ProjectDirectory
+}//HoldForm;
+
+$REQVARS={
+$TotalGraphWeight,
+$MilesPerUnitWeight,
+$EndpointsForOneWayStreets,
+$CityMapFile,
+$StreetMapFile,
+$NetworkGraph
+}//HoldForm;
+
+$DEFAULTS=Partition[#,2]&[{
+(** $REQVARS **)
+$TotalGraphWeight,0,
+$MilesPerUnitWeight,1,
+$EndpointsForOneWayStreets,{},
+$CityMapFile,"bigMapOfSeattle.jpg",
+$StreetMapFile,"seattleStreetMap.jpg",
+$NetworkGraph,Graph[{1<->1}],
+
+(** $CONSTANTS **)
+$PrintGraphsQ,True,
+$SaveGraphicsQ,False,
+$VerboseQ,True,
+$StateSuppressedQ,True,
+$DebugAllQ,False,
+$ProjectDirectory,NotebookDirectory[]
+}]//HoldForm;
+)];(*ConstantsAndRequiredVariablesModule*)
+
+
+PrintingModule[]:=Module[{},(
+Printing$StringModule[]:=Module[{},(
+
+(*A "parameterized operator" (because I don't know the conventional name for this type of construct).
+Uses padChar to pad both sides of the string representation of the argument until the total length of the string is minStringLength,then applies func to the string.
+If the length of the string is already minStringLength or longer, just applies func.
+Can be applied to any object that Mathematica's ToString command accepts as an argument.*)
+StandoutString[f_:Identity,n_,p_String]:=Module[{},(
+f@If[n-StringLength[#]>3,
+Nest[p<>#<>p&,
+If[OddQ[StringLength[#]],p<>" "," "]<>#&[#]<>" ",
+Ceiling[(If[n-#>0,n-#,n]&@StringLength[#]-1)/2]-1
+],#]&@If[#=="","(no tag)",#]&@*ToString
+)];
+
+StandoutString[func_,minStringLength_Integer]                     :=StandoutString[func,minStringLength,"*"];
+StandoutString[minStringLength_Integer,padChar_String]:=StandoutString[Identity,minStringLength,padChar];
+StandoutString[minStringLength_Integer]                                    :=StandoutString[minStringLength,"*"];
+
+HeadingString:=StandoutString[100,"-"];
+SectionString:=StandoutString[30];
+
+(*For testing StandoutString*)
+Printing$String$TestsModule[]:=Module[{t,StandoutPrint},(
+StandoutPrint[n_]:=StandoutString[Print,n,"*"]&;
+
+Print@TableForm[{StringLength[#],#}&/@
+(#/@Flatten[{Table[Nest[#<>"a"&,"",i],{i,Range[0,5]}],{aab},Null,xyz}])]&/@
+{StandoutPrint[100],StandoutPrint[5],StandoutPrint[20]};
+
+t[testStrLen_,c_,x__]:=(Print["min: "<>ToString[testStrLen]];
+Print@TableForm[{StringLength[#],#}&/@
+(#/@Table[Nest[#<>"a"&,"",i],{i,Range[0,Abs[Floor[testStrLen]]]}])]&/@
+(StandoutString[#,c]&/@{x}));
+t[#,"*",#+2,#+1,#,#-1,#-2,0]&@3
+
+OldCode[]:=Module[{},(
+StandoutString[func_,minStringLength_Integer,padChar_String]:=Module[{f=func,n=minStringLength,p=padChar},(
+f@(If[n-StringLength[#]>0,Nest[p<>#<>p&,
+(If[OddQ[StringLength[#]],p<>" "," "]<>#&)[#]<>" ",
+Ceiling[(If[n-#>1,n-#,n]&@StringLength[#]-1)/2]-1
+],#]&@If[#=="","(no tag)",#]&)@*ToString)];
+)];
+)]; (*Printing$String$TestsModule*)
+)]; (*Printing$StringModule*)
+Printing$StringModule[];
+
+VerbosePrint[args__]:=(
+If[$VerboseQ,(
+Print/@{args};
+),(
+Evaluate/@{args};
+If[$StateSuppressedQ,Print@"Verbose output suppressed."];
+)];
+);
+
+DebugPrint[on_,tag_,args__]:=Module[{
+i,d,H,S
+},(
+
+If[on||$DebugAllQ,(
+H:=Print@*HeadingString;
+S:=Print@*SectionString;
+
+H["START:  "<>ToString[tag]];
+If[SameQ[Head[#],HoldForm],
+Print[ToString[#]<>":\n\t",ReleaseHold[#]],
+Print["(Form not held)"<>":\n\t",#]]&/@{args};
+H["START:  "<>ToString[tag]];
+
+)];
+)];
+)];(*PrintingModule*)
+
+
+GraphsModule[]:=Module[{},(
+(*Print a Graph that spans the width of the window. Or don't.*)
+PrintGraph[override_,title_String,g_]:=(
+If[override||$PrintGraphsQ,(
+Print[ToString[title]<>":"];
+Print[Show[g,ImageSize->Full]]
+),(
+Print["Suppressed output for graph: "<> ToString[title]]
+)];
+);
+PrintGraph[title_String,g_]:=PrintGraph[False,title,g];
+PrintGraph[g_]:=PrintGraph[ToString[HoldForm[g]],g];
+
+(* Graph makeover! *)
+PrettyGraph[g_]:=Graph[g,GraphStyle->"Vintage",EdgeStyle->LightGray,EdgeLabels->Placed["Name", Tooltip]];
+
+ResetTotalGraphWeight[g_]:=(
+$TotalGraphWeight=0;
+Do[($TotalGraphWeight=$TotalGraphWeight+GetEdgeWeight[g,edge]),{edge,EdgeList[g]}];
+$TotalGraphWeight
+);
+)];(*GraphsModule*)
+
+
+ImageProcessingModule[]:= Module[{},(
+
+(*A bit of image processing.
+For simplicity (and because this project isn't about image manipulation) we'll treat the freeway as any other road.
+Blurring the street map over a radius of 2 pixels helps ignore the freeway's more intricate details, while
+preserving the structure of the rest of the map's streets.
+Note that this function's definition was determined by experimentation, using the Seattle street map.
+To use this program with another street map, this function may need to be modified.*)
+PrepareStreetMap[map_]:=Binarize[ColorNegate[ColorReplace[Blur[ImageAdjust[map],2],White]]];
+
+)];(*ImageProcessingModule*)
+
+
+
+GraphicsModule[]:=Module[{},(
+
+(*Saves Graphic objects.
+Appends 'projectImage_' it the file name, and saves to a folder called 'ProjectImages' in the current diretory.
+The 'ProjectImages' folder is created if it does not already exist.*)
+SaveGraphic[img_,fileName_,ext_]:=Module[{
+imageFolder,imgName,fullFileName,msg
+},(
+imageFolder="ProjectImages";
+imgName="projectImage_"<>fileName<>"."<>ext;
+
+msg=imgName<>" was NOT saved.";
+If[$SaveGraphicsQ,(
+Module[{dir},(
+dir=FileNameJoin[{$ProjectDirectory,imageFolder}];
+If[!DirectoryQ[dir],CreateDirectory[dir]];
+
+fullFileName:=ToFileName[{$ProjectDirectory,imageFolder},#]&;
+
+(*Export[fullFileName[imgName],img,ImageResolution\[Rule] 100];*)
+Export[fullFileName[imgName],ColorReplace[img,White],ImageResolution-> 100];
+)];
+msg=imgName<>" was saved."
+)];
+
+msg
+)];
+SaveGraphic[img_,fileName_]:=SaveGraphic[img,fileName,"tiff"];
+
+
+CreateImagesForProject[cityMapFile_,streetMapFile_]:=Module[{
+seattleMap,g,
+adjustedDimensions,overlay,streetMap,processedStreetMap
+},(
+If[$SaveGraphicsQ,(
+
+(*Import files used to construct graph.*)
+SetDirectory[$ProjectDirectory];
+seattleMap=Import[cityMapFile];
+streetMap  =Import[streetMapFile];
+
+adjustedDimensions = ImageDimensions[seattleMap]+{90,185};
+processedStreetMap=Binarize[ColorNegate[ColorReplace[Blur[ImageAdjust[streetMap]],White]]];
+
+(*g=Graph[MorphologicalGraph[processedStreetMap],GraphStyle\[Rule]"Vintage"];*)
+g=PrettyGraph[MorphologicalGraph[processedStreetMap]];
+
+(*overlay=ColorReplace[ImageResize[Image[g],adjustedDimensions],White];*)
+overlay=ImageResize[Image[g],adjustedDimensions];
+
+VerbosePrint[
+SaveGraphic[overlay,"FOOOOOOOOOOOBAR"],
+SaveGraphic[overlay,"Overlay"],
+SaveGraphic[seattleMap,"SeattleMap"],
+SaveGraphic[streetMap,"StreetMap"],
+SaveGraphic[ImageCompose[seattleMap,overlay,Center],"SeattleMapWithOverlay"]
+];
+)];
+)];
+
+)];(*GraphicModule*)
+
+
+StreetToGraphConversionModule[]:=Module[{},(
+
+ConvertStreetMapToGraph[map_]:=MorphologicalGraph[PrepareStreetMap[map]];
+
+(*Removes the extra directed edges pointing in the wrong direction along the paths that represent one-way streets.
+streetEndPoints is a list of pairs of vertices representing the starting and ending intersections of one-way streets, ie:
+  { {Subscript[startVertex, i],Subscript[endVertex, j]}, ..., {Subscript[startVertex, k],Subscript[endVertex, m]} }
+Note that these vertex pairs represent the intersections at both ends of an entire (straight) one-way street, and not necessarily those of a single city block.
+These vertex pairs are the starting and ending vertices of straight paths in the graph. *)
+SetOneWayStreets[g_,streetEndPoints_]:=Module[{
+i,tmp,out,streetNetwork,
+wrongWayStreets,wrongWayStreet,wrongWayStreetIntersections,
+oneWayStreets,oneWayStreet,PathEdges
+},(
+
+streetNetwork=DirectedGraph[g];
+oneWayStreets     ={};
+wrongWayStreets={};
+
+PathEdges[vertList_]:=EdgeList[PathGraph[vertList,DirectedEdges->True]];
+
+For[i=1,i<=Length[streetEndPoints],i++,(
+
+(*Shortest path between two points is a straight line.
+Assumes the an edge's weight is proportional to the distance of the road that the edge represents
+(which is edge weights are mapped in the current setup).*)
+wrongWayStreetIntersections=FindShortestPath[streetNetwork,streetEndPoints[[i,1]],streetEndPoints[[i,2]]];
+
+(*Print[streetEndPoints[[i]],":\n",oneWayStreet,"\n"];*)
+oneWayStreets     =Union[oneWayStreets,    PathEdges[wrongWayStreetIntersections]];
+wrongWayStreets=Union[wrongWayStreets,PathEdges[Reverse[wrongWayStreetIntersections]]];
+)];
+
+tmp=PrettyGraph[HighlightGraph[streetNetwork,{Style[oneWayStreets,Red]}]];
+SaveGraphic[tmp,"OnewayRoads","svg"];
+
+(*(* Commented this out because I forgot why I put it here and I'm afraid to delete it.*)
+If[$SaveGraphicsQ,(
+Module[{adjustedDimensions},(
+adjustedDimensions = ImageDimensions[seattleMap]+{90,185};
+SaveGraphic["OnewayRoads",ImageResize[Image[tmp],adjustedDimensions]];
+)];
+)];*)
+
+PrintGraph["One-Way Roads (Red)",tmp];
+
+out=EdgeAdd[streetNetwork,oneWayStreets];
+out=EdgeDelete[streetNetwork,wrongWayStreets];
+
+Return[out]
+)];
+
+
+CreateNetworkGraph[dir_,cityMapFile_,streetMapFile_,endpointsForOneWayStreets_]:=Module[{
+seattleMap,streetMap,processedStreetMap,g
+},(
+
+(*Import files used to construct graph.*)
+SetDirectory[dir];
+seattleMap=Import[cityMapFile];
+streetMap  =Import[streetMapFile];
+
+(*Reset the directory*)
+SetDirectory[$ProjectDirectory];
+
+(*Make the graph!*)
+g=ConvertStreetMapToGraph[streetMap];
+g=SetOneWayStreets[g,endpointsForOneWayStreets];
+
+ResetTotalGraphWeight[g];
+Return[PrettyGraph[g]];
+)];
+CreateNetworkGraph[endpointsForOneWayStreets_]:=CreateNetworkGraph[$ProjectDirectory,$CityMapFile,$StreetMapFile,endpointsForOneWayStreets];
+
+)];(*StreetToGraphConversionModule*)
+
+
+(***************************************************************************************************************************************)
+(******************************************************* Exécutez le programme! ********************************************************)
+(*** Construct graph used to represent the road network of Downtown Seattle and Central District (between Denny Way and E Yesler Way) ***)
+
+(* Program Constants *)
+$PrintGraphsQ  =True;
+$SaveGraphicsQ=True;
+$VerboseQ           =True;
+$StateSuppressedQ=True;
+$DebugAllQ         =True;
+
+$ProjectDirectory=NotebookDirectory[];
+
+$CityMapFile    = "bigMapOfSeattle.jpg";
+$StreetMapFile= "seattleStreetMap.jpg";
+
+$TotalGraphWeight=0;
+
+(*Found manually, comparing the graph to one-way streets found on Google Maps.
+{{Subscript[startingVertex, 1], Subscript[endingVertex, 1]},{Subscript[startingVertex, 2], Subscript[endingVertex, 2]},...} *)
+$EndpointsForOneWayStreets={
+{59,230},{78,404},{94,1448},{118,172},{122,879},{132,816},{162,230},
+{211,873},{245,25},{274,351},{369,710},{565,879},{583,1437},{747,1060},
+{873,139},{913,1140},{1120,082},{1239,1083},{1348,1379},{1424,639}
+};
+
+(*The approximate distance corresponding to a path with a weight of 484 is 3.20 miles. Found using Google Maps.*)
+$MilesPerUnitWeight=3.21 /484;
+
+Print@"Initialized program constants in Main[].";
+
+Init[];
+(*ProgramState[];*)
+Print@$CONSTANTS
+(*Construct the main graph.*)
+$NetworkGraph=CreateNetworkGraph[$ProjectDirectory,$CityMapFile,$StreetMapFile, $EndpointsForOneWayStreets];
+
+
+
+
+
+(*Create images for the presentation portion of the project.*)
+CreateImagesForProject[$CityMapFile,$StreetMapFile];
+
+(*Used to get edge weights in constant time (vs linear)*)
+(*$EdgeWeights = Association[Map[#\[Rule]PropertyValue[{$NetworkGraph,#},EdgeWeight]&,EdgeList[$NetworkGraph]]];*)
+(*$EdgeWeights = Association[#\[RuleDelayed]PropertyValue[{$NetworkGraph,#},EdgeWeight]&/@EdgeList[$NetworkGraph]];*)
+
+
+(*Convenience functions, for code readability.*)
+(*Used to get edge weights in constant time (vs linear)*)
+(*$EdgeWeights = Association[Map[#\[Rule]PropertyValue[{$NetworkGraph,#},EdgeWeight]&,EdgeList[$NetworkGraph]]];*)
+(*$EdgeWeights = Association[#\[RuleDelayed]PropertyValue[{$NetworkGraph,#},EdgeWeight]&/@EdgeList[$NetworkGraph]];*)
+(*GetEdgeWeight[g_,edge_]:=$EdgeWeights[[Key[edge]]];*)
+GetEdgeWeight[g_,edge_]:=PropertyValue[{g,edge},EdgeWeight];
+ConvertEdgeWeightToMiles[w_]:=w*$MilesPerUnitWeight;
+
+(*(*The snippet of code used to find total the weight of a path corresponding to 3.2 mile long stretch of road*)
+pathWeight=0;
+Do[(pathWeight=pathWeight+GetEdgeWeight[edge]),{edge,{63\[DirectedEdge]64,64\[DirectedEdge]72,72\[DirectedEdge]73,73\[DirectedEdge]69,69\[DirectedEdge]74,74\[DirectedEdge]70,70\[DirectedEdge]78,78\[DirectedEdge]65,65\[DirectedEdge]75,75\[DirectedEdge]76,76\[DirectedEdge]79,79\[DirectedEdge]94,94\[DirectedEdge]112,112\[DirectedEdge]113,113\[DirectedEdge]81,81\[DirectedEdge]95,95\[DirectedEdge]96,96\[DirectedEdge]114,114\[DirectedEdge]82,82\[DirectedEdge]97,97\[DirectedEdge]98,98\[DirectedEdge]83,83\[DirectedEdge]115,115\[DirectedEdge]99,99\[DirectedEdge]84,84\[DirectedEdge]116,116\[DirectedEdge]85,85\[DirectedEdge]117,117\[DirectedEdge]118,118\[DirectedEdge]100,100\[DirectedEdge]119,119\[DirectedEdge]120,120\[DirectedEdge]121,121\[DirectedEdge]101,101\[DirectedEdge]143,143\[DirectedEdge]122,122\[DirectedEdge]144,144\[DirectedEdge]133,133\[DirectedEdge]134,134\[DirectedEdge]135,135\[DirectedEdge]145,145\[DirectedEdge]136,136\[DirectedEdge]123,123\[DirectedEdge]137,137\[DirectedEdge]102,102\[DirectedEdge]103,103\[DirectedEdge]104,104\[DirectedEdge]124,124\[DirectedEdge]86,86\[DirectedEdge]105,105\[DirectedEdge]106,106\[DirectedEdge]107,107\[DirectedEdge]108,108\[DirectedEdge]109,109\[DirectedEdge]146,146\[DirectedEdge]155,155\[DirectedEdge]156,156\[DirectedEdge]157,157\[DirectedEdge]158,158\[DirectedEdge]159,159\[DirectedEdge]160,160\[DirectedEdge]161,161\[DirectedEdge]166,166\[DirectedEdge]167,167\[DirectedEdge]191,191\[DirectedEdge]192,192\[DirectedEdge]147,147\[DirectedEdge]125,125\[DirectedEdge]126,126\[DirectedEdge]127,127\[DirectedEdge]128,128\[DirectedEdge]138,138\[DirectedEdge]139,139\[DirectedEdge]140,140\[DirectedEdge]141,141\[DirectedEdge]148,148\[DirectedEdge]142,142\[DirectedEdge]149}}];*)
+(*$TotalGraphWeight=0;*)
+
+
+
+DebugPrint[True,"$NetworkGraph, total edge weight, and corresponding mileage",
+(*HoldForm[PrintGraph[$NetworkGraph]],*)
+HoldForm[$TotalGraphWeight],
+HoldForm[ConvertEdgeWeightToMiles[$TotalGraphWeight]]
+];
+
+$NetworkGraph=EdgeDelete[#,RandomSample[EdgeList[#],Length[#]]]&@$NetworkGraph;
+
+ResetTotalGraphWeight[];
+
+DebugPrint[True,"$NetworkGraph, total edge weight, and corresponding mileage",
+(*HoldForm[PrintGraph[$NetworkGraph]],*)
+HoldForm[$TotalGraphWeight],
+HoldForm[ConvertEdgeWeightToMiles[$TotalGraphWeight]]
+]
+
+(*SaveGraphic[$NetworkGraph,"NetworkGraph","svg"]*)
+(*SaveGraphic[Import["OnewayRoads.tiff"],"OnewayRoads"]*)
+
+
+FindOddVerts[g_]:=Select[VertexList@g,OddQ[VertexDegree[g,#]]&];
+FindOddInVerts[g_]:=Select[VertexList@g,OddQ[VertexInDegree[g,#]]&];
+FindOddOutVerts[g_]:=Select[VertexList@g,OddQ[VertexOutDegree[g,#]]&];
+FindVertsWithUnequalInAndOutDegrees[g_]:=Select[VertexList[g],(VertexInDegree[g,#]=!= VertexOutDegree[g,#])&];
+
+FindVertsWithUnequalInAndOutDegrees1[g_]:=Block[{
+in,out,verts={}
+},(
+
+Do[(
+in  =VertexInDegree[g,  v];
+out=VertexOutDegree[g,v];
+If[(in=!=out),(
+AppendTo[verts,{v,{in,-out,in-out}}];
+)];
+),
+{v,VertexList[g]}
+];
+
+verts
+)];
+
+TJoin[g_]:=Module[{
+T,odds,oddIns,oddOuts,
+insUnequalOuts,
+tJoin
+},(
+
+odds=FindOddVerts@g;(*T is the set of odd verts*)
+oddIns  =FindOddInVerts@g;(*T is the set of odd verts*)
+oddOuts=FindOddOutVerts@g;(*T is the set of odd verts*)
+
+(*tJoin;(*TJoin is the edge set st in its induced subgraph, the collection of all odd vertices is exactly T*)*)
+
+insUnequalOuts=FindVertsWithUnequalInAndOutDegrees@g;
+
+(*{{"odds",odds},{"oddIns",oddIns},{"oddOuts",oddOuts},{"insUnequalOuts",insUnequalOuts}};*)
+
+Sort/@{odds,oddIns,oddOuts,insUnequalOuts}
+)];
+
+DebugPrint[False,"Odd verts table",(
+Module[{h,t},(
+h:=#1<>":"<>ToString@Length[#2[[#3]]]&;
+t:=TableForm[Partition[#,4],TableHeadings->{None,{h["odd",#,1],h["oddIn",#,2],h["oddOut",#,3],h["in!=out",#,4]}},TableAlignments->{Left, Top}]&;
+t@TJoin[$NetworkGraph]
+)]
+)];
+
+PrintGraph["Odd Verts",HighlightGraph[$NetworkGraph,subg]];
+
+
+h=Graph[EdgeList[$NetworkGraph]];
+FindVertsWithUnequalInAndOutDegrees1@h

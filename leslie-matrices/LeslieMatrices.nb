@@ -1,0 +1,344 @@
+(*Author: Storm Meadows*)
+(*Leslie Matrices:*)
+(*Create Graphics for Presentation*)
+Init[];
+(*************************************************************************************************************)
+(************************************************* LeslieDemo ************************************************)
+BinomialDistVect[m_]:=Module[{len=If[ListQ[m],Last@Dimensions[m],m]
+},(Array[Binomial[len-1,len-#1]&,len])];
+ConvertToMarkovMatrix[m_]:=Transpose[ConvertToProbabilityVector/@Transpose[m]];
+
+(*L0=LeslieMatrix[
+RandomReal[1,#]*BinomialDistVect[#],
+Append[RandomReal[1,#-1],0]*RandomSample[ConvertToProbabilityVector@BinomialDistVect[#]]]&@10;
+L1=LeslieMatrix[
+RandomReal[1,#]*BinomialDistVect[#],
+Append[RandomReal[1,#-1],0]*RandomSample[ConvertToProbabilityVector@BinomialDistVect[#]]]&@10;*)
+L0=RandomLeslieMatrix[7];
+L1=ConvertToMarkovMatrix[RandomLeslieMatrix[7]];
+
+L=L0+L1;
+
+LeslieMatrixTableForm[L]
+n0=RandomPopulationVector[L];
+
+(*transition-rates (vs survival-rates). entries not limited to positions directly beneath diagonal*)
+(*LefkovitchMatrixTableForm[L] *)
+
+Show[MatrixToGraph[L],ImageSize->Large]
+
+ShowMatrixPowerConvergence[L]
+
+AsymptoticGrowthRatePlot[L,n0,0,ApproxPowerForMatrixConvergence[L]]
+AsymptoticGrowthRatePlot[L,n0,0,100]
+
+StabilizingDistributionPlot[L,n0,0,2]
+StabilizingDistributionPlot[L,n0,0,ApproxPowerForMatrixConvergence[L]]
+(*AsymptoticGrowthRatePlot[L,RandomPopulationVector[L,0,0]]
+StabilizingDistributionPlot[L,RandomPopulationVector[L,0,0]]*)
+
+
+(*Data Used In Project*)
+(**********************************************************************************************************************)
+(****************************************** Data used in project/presentation ******************************************)
+(*A={{0.`,0.01`,0.16`,0.45`,0.6`,0.66`,0.62`,0.54`,0.31`,0.03`},{0.75`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.9`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.95`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.96`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.94`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.99`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.92`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.98`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.93`,0.`}};
+n0={2,10,2,7,99,7,7,516,317,533};*)
+Code to Create Demonstration/Graphics
+
+(*in case user doesn't allow initialization cells to be evaluated first, call Init[] at start of program*)
+Init[]:=(
+(********************************************************************************************************************)
+(********************************************* Core functions  ******************************************************)
+
+(*Creates a LeslieMatrix*)
+LeslieMatrix[fecundityRates_,survivalRates_]:=Module[{m},(
+Which[Length@fecundityRates =!= Length@survivalRates,Throw[{fecundityRates,survivalRates},"Num f rates must equal num s rates!"],
+survivalRates[[-1]]=!=0&&survivalRates[[-1]]=!=0.,Throw[survivalRates,"Last s rate must be 0!"]];
+m=RotateRight[DiagonalMatrix[survivalRates]];
+m[[1]]=fecundityRates;
+m)];
+LeslieMatrix[fecundityRates_,survivalRates_,lifeStageNames_]:=Module[{m},(
+m=LeslieMatrix[fecundityRates,survivalRates];m)];
+
+
+(*A LeslieMatrix wrapper*)
+LeslieMatrixTableForm[leslieMatrix_,lifeStageNames_]:=Module[{rowHead=lifeStageNames},(
+rowHead=Embolden/@Prepend[(StringForm["s-rate of `` (t-rate to next AgeClass)",#]&/@rowHead[[;;-2]]),"f-rates"];
+TableForm[leslieMatrix,TableHeadings->{rowHead,lifeStageNames}]
+)];
+LeslieMatrixTableForm[m_]:=LeslieMatrixTableForm[m,SymbolicVector[m,"AgeClass",-1]];
+
+
+(*A LefkovitchMatrixTable wrapper*)
+LefkovitchMatrixTableForm[lefkovitchMatrix_,lifeStageNames_]:=Module[{rowHead=lifeStageNames},(
+rowHead=Embolden/@Prepend[StringForm["t-rate to ``",#]&/@rowHead[[2;;]],"f-rates"];
+TableForm[lefkovitchMatrix,TableHeadings->{rowHead,lifeStageNames}]
+)];
+LefkovitchMatrixTableForm[m_]:=LefkovitchMatrixTableForm[m,SymbolicVector[m,"StageClass",-1]];
+
+
+(*Creates a graph from a matrix, using entries as edge weights*)
+MatrixToGraph[m_,VertexLabelFn_]:=Module[{
+vLbls,i,j,dims=Dimensions[m],
+edges={},edgeWeights={}
+},(
+For[i=1,i<=dims[[1]],i++,(
+For[j=1,j<=dims[[2]],j++,(
+If[TrueQ[m[[i,j]]=!=0&&m[[i,j]]=!=0.],(
+AppendTo[edges,j\[DirectedEdge]i]; (* ProbabilityOf(row's class|column's class) *)
+AppendTo[edgeWeights,j\[DirectedEdge]i->m[[i,j]]];
+)];
+)];
+)];
+If[Length[vLbls]==0,vLbls=Table[v->VertexLabelFn[v],{v,VertexList[Graph[edges]]}]];
+
+Graph[edges,
+GraphLayout->{"RenderingOrder"->"VertexFirst"},
+(*GraphLayout\[Rule]"PlanarEmbedding",*)
+GraphLayout->"SpringEmbedding",
+GraphStyle->"DynamicHighlight",
+VertexSize->Large,
+VertexLabels->vLbls,
+EdgeWeight->edgeWeights,
+EdgeLabels->edgeWeights
+]
+)];
+MatrixToGraph[m_]:=MatrixToGraph[m,Placed[Style[#-1,Bold,Red],Center]&];
+
+
+(*Returns eigenvalue corresponding to the asymptotic growth rate at the stable age distribution,
+which will be unique, real, and nonegative if the Leslie matrix is a Frobenius matrix.
+First checks for a maximum postive real eigenvalue.
+If no such eigenvalue, returns the complex eigenvalue with the greatest absolute value.*)
+DominantEigenvalue[m_]:=Module[{
+positiveRealEigenvalues=Select[(If[Im[#]==0,Re[#],#]&/@Eigenvalues[m]),Im[#]==0&&#>0&]
+},(
+If[Length[positiveRealEigenvalues]>0,
+ Max[positiveRealEigenvalues],
+ First@MaximalBy[Select[Eigenvalues[m],Im[#]=!=0&],Abs]
+])];
+
+
+(*Returns the eigenvector corresponding to the stable age distribution*)
+DominantEigenvector[m_]:=Module[{
+eigenSystem=Eigensystem[m],
+domEigenVal=DominantEigenvalue[m],
+domEigenVect
+},(
+Do[If[domEigenVal==eigenSystem[[1,i]],(
+domEigenVect=eigenSystem[[2,i]];
+Break[]
+)],{i,Length@eigenSystem}];
+
+(*Don't need imaginary parts if they're 0.*)
+If[Im[#]==0,Re[#],#]&/@domEigenVect
+)];
+
+(*Returns a proportional vector whose components sum to one*)
+ConvertToProbabilityVector[v_]:=Abs/@(v/Total[v]);
+
+
+(***************************************************************************************************************************************)
+(************************************** Visuals/graphics for powerpoint and demonstrations **********************************************)
+Embolden:=Style[#,Bold]&;
+EmboldenVec:=Embolden@OverVector[#]&;
+
+(*Asymptotic growth rate determined by dominant eigenvector, regardless of initial population vector (\[NotEqual] 0-vector)*)
+AsymptoticGrowthRatePlot[m_,n0_,tMin_,tMax_]:=Module[{
+lambda=DominantEigenvalue[m],
+matrixFnLegend,expFnLabel
+},(
+matrixFnLegend=StringForm["(Subsuperscript[\[Sum], i=1, ``]Subscript[n, i])``^t.Subscript[``, 0], Subscript[``, 0]=``",Length@n0,Embolden@"L",EmboldenVec@"n",EmboldenVec@"n",MatrixForm@n0];
+expFnLabel=StringForm["(Subsuperscript[\[Sum], i=1, ``]Subscript[n, i])e^(Subscript[\[Lambda], 1]t), Subscript[\[Lambda], 1]=``",Length@n0,lambda];
+Show[
+ListPlot[Table[Total[(MatrixPower[m,t]).n0],{t,tMin,tMax,1}],PlotStyle->{Blue},PlotLegends->{matrixFnLegend}],
+Plot[Total[n0]*E^(Log[lambda]*t),{t,tMin,tMax},PlotStyle->{Red},PlotLegends->{expFnLabel}]
+,PlotLabel->StringForm["Asymptotic growth rate determined by dominant eigenvalue,\nregardless of initial population vector `` (!= ``)",EmboldenVec@"n",EmboldenVec@"0"]
+,AxesLabel->{"Time t",StringForm["Total population size Subsuperscript[\[Sum], i=1, ``]Subscript[n, i]",Length@n0]}
+,ImageSize->Large]
+)];
+AsymptoticGrowthRatePlot[m_,tMin_,tMax_]:=AsymptoticGrowthRatePlot[m,RandomPopulationVector[m,0,1000],tMin,tMax];
+AsymptoticGrowthRatePlot[m_,n0_]:=AsymptoticGrowthRatePlot[m,n0,0,Ceiling[ApproxPowerForMatrixConvergence[L]]];
+AsymptoticGrowthRatePlot[m_]:=AsymptoticGrowthRatePlot[m,0,Ceiling[ApproxPowerForMatrixConvergence[L]]];
+(*AsymptoticGrowthRatePlot[m_]:=AsymptoticGrowthRatePlot[m,0,25];*)
+
+
+(*Population distribution approaches that of the dominant eigenvector regardless of initial population*)
+StabilizingDistributionPlot[m_,n0_,tMin_,tMax_]:=Module[{
+stableDist=ConvertToProbabilityVector[DominantEigenvector[m]]
+},(
+Show[
+Plot[{stableDist,ConvertToProbabilityVector[MatrixPower[m,t].n0 ]},{t,tMin,tMax}
+,PlotLabel->StringForm["Population distribution approaches that of the dominant eigenvector, \nregardless of initial population distribution `` (!= ``)",EmboldenVec@"n",EmboldenVec@"0"]
+,AxesLabel->{"Time t","Population distribution of age-Subscript[class, i]"}
+],ImageSize->Large]
+)];
+StabilizingDistributionPlot[m_,tMin_,tMax_]:=StabilizingDistributionPlot[m,RandomPopulationVector[m,0,1000],tMin,tMax];
+StabilizingDistributionPlot[m_,n0_]:=StabilizingDistributionPlot[m,n0,0,Ceiling[ApproxPowerForMatrixConvergence[L]]];
+StabilizingDistributionPlot[m_]:=StabilizingDistributionPlot[m,0,Ceiling[ApproxPowerForMatrixConvergence[L]]];
+
+
+(*Tests whether m3 and m2 are within epsilon of m2 and m1*)
+MatricesWithinEpsilonQ[m1_,m2_,m3_,epsilon_]:=Module[{change1,change2,delta,allPosQ},(
+allPosQ=Positive[Norm[m1]]&&Positive[Norm[m2]]&&Positive[Norm[m3]];
+change2=EuclideanDistance[m3-m2,m2]/EuclideanDistance[m3,m2];
+change1=EuclideanDistance[m2-m1,m1]/EuclideanDistance[m2,m1];
+delta=Abs[change2-change1];
+
+allPosQ&&(delta<=epsilon)
+)];
+
+(*Returns power of L for approx convergence*)
+ApproxPowerForMatrixConvergence[m_,powStep_,epsilon_,maxItrs_]:=Module[{pow=1},
+NestWhile[MatrixPower[m,pow+=powStep]&,m,!MatricesWithinEpsilonQ[#1,#2,#3,epsilon]&,3,maxItrs+3];
+(*Print[pow," ",powStep," ",maxItrs," ",N[maxItrs*powStep-pow-1]];*)
+pow];
+ApproxPowerForMatrixConvergence[m_]:=ApproxPowerForMatrixConvergence[m,1,N[10^-3],600];
+
+(*Shows how L changes over time*)
+MatrixPowerConvergence[m_,powStep_,epsilon_,maxItrs_]:=Module[{pow=1,mList},
+mList=NestWhileList[MatrixPower[m,pow+=powStep]&,m,!MatricesWithinEpsilonQ[#1,#2,#3,epsilon]&,3,maxItrs+3];
+mList
+];
+MatrixPowerConvergence[m_]:=MatrixPowerConvergence[m,1,N[10^-5],600];
+
+GenImage[list_]:=ImageAssemble[Partition[(MatrixPlot[#,Frame->False]&/@list),Ceiling[Sqrt[1+Length[list]]]]];
+
+MatrixPowerConvergenceImage[m_,powStep_,epsilon_,maxItrs_]:=GenImage[MatrixPowerConvergence[m,powStep,epsilon,maxItrs]];
+MatrixPowerConvergenceImage[m_]:=GenImage[MatrixPowerConvergence[m]];
+
+(*See how matrix converges with time*)
+ShowMatrixPowerConvergence[m_,powStep_,epsilon_,maxItrs_]:=Show[MatrixPowerConvergenceImage[m,powStep,epsilon,maxItrs],ImageSize->Large];
+ShowMatrixPowerConvergence[m_]:=ShowMatrixPowerConvergence[m,1,N[10^-6],600];
+
+
+
+(***************************************************************************************************************************************)
+(************************************************ Generate tests and examples ***********************************************************)
+
+(*To make random vectors*)
+RandomVector[m_,f_]:=Array[f,{If[ListQ[m],Last[Dimensions[m]],m]}];
+
+RandomFecundityRateVector[m_,min_,max_]:=RandomVector[m,RandomReal[{min,max}]&];
+
+(*To generate test data*)
+RandomFecundityRateVector[m_,min_,max_]:=Array[RandomReal[{min,max}]&,If[ListQ[m],Last[Dimensions[m]],m]];
+RandomFecundityRateVector[m_]:=RandomFecundityRateVector[m,1,10];
+
+RandomPopulationVector[m_,min_,max_]:=Array[RandomInteger[{min,max}]&,If[ListQ[m],Last[Dimensions[m]],m]];
+RandomPopulationVector[m_]:=RandomPopulationVector[m,1,100];
+
+RandomSurvivalRateVector[m_]:=Append[RandomReal[1,If[ListQ[m],Last[Dimensions[m]],m]-1],0];
+
+RandomLeslieMatrix[numStages_]:=LeslieMatrix[RandomFecundityRateVector[numStages],RandomSurvivalRateVector[numStages]];
+RandomLeslieMatrix[numStages_,fMin_,fMax_]:=LeslieMatrix[RandomFecundityRateVector[numStages,fMin,fMax],RandomSurvivalRateVector[numStages]];
+
+(*To make symbolic vectors*)
+SymbolicVector[n_,str_,offset1_,offset2_]:=Table[Style[Subscript[str,i],Bold] ,{i,Range[1+offset1,n+offset2]}];
+SymbolicVector[m_List,str_,offset1_,offset2_]:=SymbolicVector[If[ListQ[m],Last[Dimensions[m]],m],str,offset1,offset2];
+SymbolicVector[m_,str_,offset_]:=SymbolicVector[m,str,offset,offset];
+SymbolicVector[m_,str_]:=SymbolicVector[m,str,0];
+
+(*Symbolic representation of important vectors*)
+SymbolicFecundityRateVector[m_]:=SymbolicVector[m,"f",-1];
+SymbolicSurvivalRateVector[m_]:=Append[SymbolicVector[m,"s",-1,-2],0];
+SymbolicPopulationVector[m_]:=SymbolicVector[m,"n",-1];
+
+(*Symbolic representation of a Leslie matrix*)
+SymbolicLeslieMatrix[numStages_]:=LeslieMatrix[SymbolicFecundityRateVector[numStages],SymbolicSurvivalRateVector[numStages]];
+
+(*"
+To build a Leslie matrix, need to know the following about the given population:
+Subscript[n, x]: the count of individuals (n) of each age class x,
+Subscript[s, x]: the fraction of individuals that survives from age class x to age class x+1,
+Subscript[f, x]: fecundity - the per capita average number of female offspring reaching Subscript[n, 0] born from mother of the age class x.
+Can be viewed as the number of offspring produced at the next age class.
+Subscript[b, x+1] weighted by the probability of reaching the next age class.
+Therefore Subscript[f, x]=Subscript[s, x]Subscript[b, x+1]
+"*)
+
+(*Returns a parameterized function of t for the Leslie model, ie Subscript[n, t] = L^tSubscript[n, 0]. (or, n[t_]=MatrixPower[L,t].Subscript[n, 0] )
+Takes a Leslie matrix and an initial population vector.*)
+LeslieFunction[L_,n0_]:=MatrixPower[L,#].n0&;
+
+(********************************************************************************************************************)
+(****************************************************** I/O *********************************************************)
+
+SaveGraphic[graphic_,fileName_String,ext_String]:=Module[{
+FullFileName,imageFolder="Project2Images",
+imgName="project2Image_"<>fileName<>"."<>ext
+},(
+Module[{dir=FileNameJoin[{"~/Desktop",imageFolder}]},(
+If[!DirectoryQ[dir],CreateDirectory[dir]];
+
+FullFileName:=ToFileName[{"~/Desktop",imageFolder},#]&;
+
+Export[FullFileName[imgName],(*ColorReplace[Image[graphic,ImageResolution\[Rule] 100],White],*)
+graphic,ImageResolution-> 100];
+)];
+
+imgName <> " was saved."
+)];
+SaveGraphic[img_,fileName_]:=SaveGraphic[img,fileName,"tiff"];
+SaveGraphic[str_,fileName_]:=SaveGraphic[Graphics[Text[str]],fileName,"tiff"];
+);
+Init[];
+(****************************************************************************************************************)
+(************************************************** Tests *******************************************************)
+
+LeslieTests[runAllTestsQ_]:=Module[{P,tmp,
+testL=SymbolicLeslieMatrix[10],
+testN,A=RandomLeslieMatrix[5],
+L=RandomLeslieMatrix[5]
+},(
+testN=SymbolicPopulationVector[testL];
+
+P[tag_,override_]:=If[runAllTestsQ||override,Print/@{ToString[tag]<>":",##}]&;
+P[override_]:=If[runAllTestsQ||override,Print@#]&;
+
+P["Leslie matrix",False][testL//MatrixForm,testL(*//LeslieMatrixTableForm*)];
+
+(*Test dominant eigenvalue and eigenvector*)
+P["Characteristic polynomial of symbolic Lesile matrix",False][DominantEigenvalue[testL]];
+P["Eigenvalues",False][Eigenvalues[L]];
+P["Dominant eigenvalue",False][DominantEigenvalue[L]];
+P["Dominant eigenvector",False][DominantEigenvector[L]];
+P["Is really right-eigenvector? L.x == \[Lambda]L",False][L.DominantEigenvector[L]==DominantEigenvalue[L]*DominantEigenvector[L]];
+
+(*Initial population vectors.*)
+P["Random population vector",False]@RandomPopulationVector[L,50,1000];
+tmp=ConvertToProbabilityVector@ RandomPopulationVector[L,50,1000];
+P["Random probability vector",False][StringForm["Total[``] == 1: ``",tmp,Total[tmp]==1]];
+P["s rates",False]@SymbolicSurvivalRateVector[L];
+P["pop vector",False]@testN;
+P["f rates",False]@SymbolicFecundityRateVector[L];
+P["Initial population vector",False]@SymbolicPopulationVector[L];
+
+P["Graph representation",False][MatrixToGraph[N@L]];
+P["Graph representation",False][MatrixToGraph[testL]];
+
+P["Symbolic tensors",False][
+SymbolicFecundityRateVector[A],
+SymbolicSurvivalRateVector[A],
+SymbolicPopulationVector[A],
+SymbolicLeslieMatrix[A]//LeslieMatrixTableForm];
+P["Random vectors and matrices",False][
+RandomFecundityRateVector[A],
+RandomSurvivalRateVector[A],
+RandomPopulationVector[A],
+RandomLeslieMatrix[A]//LeslieMatrixTableForm];
+
+(*img=MatrixPowerConvergenceImage[RandomLeslieMatrix[10].RandomLeslieMatrix[10,-5,5],.1,.00001,100];
+Show[img,ImageSize\[Rule]Large]*)
+(*img=ImageAssemble[ShowMatrixConvergence[A]];
+Show[img,ImageSize\[Rule]Full]*)
+
+"Tests complete."
+)]
+LeslieTests[False]
+
+(*Tests complete.*)
+(**********************************************************************************************************************)
+(****************************************** Data used in project/presentation ******************************************)
+(*A={{0.`,0.01`,0.16`,0.45`,0.6`,0.66`,0.62`,0.54`,0.31`,0.03`},{0.75`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.9`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.95`,0.`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.96`,0.`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.94`,0.`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.99`,0.`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.92`,0.`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.98`,0.`,0.`},{0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.`,0.93`,0.`}};
+n0={2,10,2,7,99,7,7,516,317,533};*)
